@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ipybox-sandbox"
+version = "1.0.0"
+description = "Stateful IPython kernel sandbox with pluggable extensions"
+requires-python = ">=3.10"
+dependencies = [
+    "jupyter-client>=8.0.0",
+    "ipykernel>=6.0",
+    "ipython>=8.0",
+    "ijson>=3.0",
+    "mcp>=1.26.0",
+    "fastmcp>=2.0.0",
+    "pyyaml>=6.0",
+    "mcp2cli @ git+https://github.com/prog76/mcp_mcp2cli.git",
+]
+
+[project.scripts]
+ipybox-server = "ipybox.cli:main"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ipybox"]
