@@ -33,5 +33,8 @@ RUN mkdir -p /opt/ipybox/extensions /var/mcp/skills /var/mcp/workspace
 
 EXPOSE 9006
 
+# Disable ANSI color codes in kernel/tool output — agents consume plain text.
+ENV PYTHON_COLORS=0
+
 ENTRYPOINT ["ipybox-server"]
 CMD ["--host", "0.0.0.0", "--port", "9006"]

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""Tests for the structured mcp_call result schema."""
+"""Tests for the structured mcp_call result schema and the sync kernel wrappers."""
 import os, sys, types, unittest
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path: sys.path.insert(0, _SRC)
-for _m in ("ipybox",): sys.modules.pop(_m, None)
 import ipybox.mcp_client as mcp_client
-import ipybox.helpers as ipybox_helpers
+from ipybox.kernel.extensions import get_registry
+
+_registry = get_registry()
+mcp_call = _registry.get("mcp_call")
+mcp_call_text = _registry.get("mcp_call_text")
+exec_run = _registry.get("exec_run")
 
 def _text(v): return types.SimpleNamespace(type="text", text=v)
 def _result(content, is_error=False, sc=None):
@@ -35,17 +39,17 @@ class TestWrappers(unittest.TestCase):
     async def _fake(self, upstream, action, arguments=None, stdin=None, timeout=120, endpoint=None):
         return mcp_client._build_call_result(_result([_text("OUT-42")]), upstream, "exec_run")
     def test_mcp_call_dict_and_text(self):
-        orig = ipybox_helpers.mcp_call_async; ipybox_helpers.mcp_call_async = self._fake
+        orig = mcp_client.mcp_call_async; mcp_client.mcp_call_async = self._fake
         try:
-            self.assertIsInstance(ipybox_helpers.mcp_call("exec","run",{"command":["a"]}), dict)
-            self.assertEqual(ipybox_helpers.mcp_call_text("exec","run",{"command":["a"]}), "OUT-42")
-        finally: ipybox_helpers.mcp_call_async = orig
+            self.assertIsInstance(mcp_call("exec","run",{"command":["a"]}), dict)
+            self.assertEqual(mcp_call_text("exec","run",{"command":["a"]}), "OUT-42")
+        finally: mcp_client.mcp_call_async = orig
     def test_exec_run_text(self):
         async def fake(upstream, action, arguments=None, stdin=None, timeout=120, endpoint=None):
             return {"ok": True, "is_error": False, "upstream": "exec", "action": "run",
                     "text": "hello", "content": [], "structured_content": None}
-        orig = ipybox_helpers.mcp_call_async; ipybox_helpers.mcp_call_async = fake
-        try: self.assertEqual(ipybox_helpers.exec_run(["echo","hi"]), "hello")
-        finally: ipybox_helpers.mcp_call_async = orig
+        orig = mcp_client.mcp_call_async; mcp_client.mcp_call_async = fake
+        try: self.assertEqual(exec_run(["echo","hi"]), "hello")
+        finally: mcp_client.mcp_call_async = orig
 
 if __name__ == "__main__": unittest.main(verbosity=2)

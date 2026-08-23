@@ -1,30 +1,21 @@
 #!/usr/bin/env python3
 """
-ipybox IPython startup script (placed in profile_default/startup/00_autoimport.py).
-
-Thin wrapper around ``ipybox_helpers`` — the single source of truth for the
-kernel helper functions.  This script imports the helpers and injects them
-into the kernel's builtins so the agent can call them directly from any
-``execute_code`` cell without an explicit import.
-
-Available helpers (see ipybox_helpers for full docs):
-  exec_run, ssh_execute, ssh_execute_background, ssh_ensure_file, kubectl_exec,
-  mcp_call, mcp_list_upstreams, mcp_list_actions, mcp_describe,
-  list_skills, get_skill, create_skill, update_skill,
-  list_functions, describe_function
+ipybox IPython startup script.
+Injects helpers from the extension registry into builtins.
 """
 
 import builtins
+import sys
 
-from ipybox.helpers import _helpers
+# Suppress tracebacks in kernel output — agents only need the exception
+# type/message, and full stack traces waste tokens / leak internals.
+sys.tracebacklimit = 0
 
-# Inject the helpers into builtins so they're available without imports.
-for _name, _fn in _helpers.items():
-    setattr(builtins, _name, _fn)
+from ipybox.kernel.extensions import get_registry
 
-# Also re-export the helpers at module level so introspection works
-# (list_functions / describe_function / etc. are callable as
-# ipybox_startup.<name>).
-globals().update(_helpers)
+registry = get_registry()
+registry.inject_into_builtins()
 
-print("[ipybox startup] Auto-imported: " + ", ".join(sorted(_helpers.keys())))
+globals().update({name: fn for name, fn in registry._helpers.items()})
+
+print(f"[ipybox startup] Auto-imported: {', '.join(sorted(registry.list()))}")
