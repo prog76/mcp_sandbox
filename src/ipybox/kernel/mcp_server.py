@@ -182,6 +182,48 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+# Hard ceiling for a single execute_code request (kernel-side). Long-running
+# jobs should use job_submit/job_wait; this timeout must accommodate the
+# blocking job_wait polls (up to 300s each). Keep-alive progress notifications
+# keep MCP clients alive for the whole duration.
+_EXECUTE_TIMEOUT_SECONDS = int(os.environ.get("IPYBOX_EXECUTE_TIMEOUT", "600"))
+# Interval for keep-alive progress notifications sent while code executes.
+# Must stay below MCP clients' idle timeout (SuperAssistant extension: 30s).
+_KEEPALIVE_INTERVAL_SECONDS = float(os.environ.get("IPYBOX_KEEPALIVE_INTERVAL", "10"))
+
+
+async def _keepalive(ctx: Any, started: float, total: float, label: str) -> None:
+    """Emit periodic progress notifications while a long execute is running.
+
+    Each notification resets the MCP client's idle timeout, so long-running
+    code (e.g. blocking job_wait polls) is not killed client-side. Best-effort:
+    failures (no progressToken from client, older fastmcp without `message`,
+    closed stream) are swallowed.
+    """
+    beat = 0
+    while True:
+        await asyncio.sleep(_KEEPALIVE_INTERVAL_SECONDS)
+        beat += 1
+        elapsed = time.monotonic() - started
+        if ctx is None:
+            continue
+        try:
+            await ctx.report_progress(
+                progress=elapsed,
+                total=total,
+                message=f"{label} running ({elapsed:.0f}s)",
+            )
+        except TypeError:
+            # Older fastmcp Context.report_progress has no `message` kwarg.
+            try:
+                await ctx.report_progress(progress=elapsed, total=total)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        log.debug("execute_code keepalive beat %d (%.0fs elapsed) %s", beat, elapsed, label)
+
+
 def _execute_sync(kc: Any, code: str, timeout: int = 120) -> str:
     try:
         reply = kc.execute(code, reply=True, timeout=timeout)
@@ -284,14 +326,33 @@ async def execute_code(
     code: str,
     session_id: Optional[str] = None,
     kernel_env: Optional[Dict[str, str]] = None,
+    ctx: Optional[FastMCPContext] = None,
 ) -> str:
     key = None
+    ka_task: Optional[asyncio.Task] = None
     try:
         key = _resolve_session_id(session_id, kernel_env)
         session = _get_or_create_session(key, kernel_env)
         session.last_used = time.monotonic()
         loop = asyncio.get_event_loop()
-        output = await loop.run_in_executor(None, _execute_sync, session.kc, code)
+        started = time.monotonic()
+
+        # Keep-alive: emit progress notifications while the code runs so MCP
+        # clients (e.g. browser extensions with progress-reset timeouts) don't
+        # kill long-running executions such as blocking job_wait polls.
+        ka_task = asyncio.create_task(_keepalive(ctx, started, float(_EXECUTE_TIMEOUT_SECONDS), "code"))
+        try:
+            output = await loop.run_in_executor(
+                None, lambda: _execute_sync(session.kc, code, timeout=_EXECUTE_TIMEOUT_SECONDS)
+            )
+        finally:
+            if ka_task is not None:
+                ka_task.cancel()
+                try:
+                    await ka_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
         session.last_used = time.monotonic()
         return f"session_id: {key}\n{output}"
     except Exception as e:
