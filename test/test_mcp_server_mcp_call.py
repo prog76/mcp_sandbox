@@ -22,11 +22,6 @@ _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
-# Fresh import so the FastMCP app is built without stale state.
-for _m in list(sys.modules):
-    if _m.startswith("ipybox"):
-        sys.modules.pop(_m, None)
-
 import ipybox.kernel.mcp_server as server  # noqa: E402
 
 
@@ -54,7 +49,7 @@ class TestResultFormatting(unittest.TestCase):
     """Tests for mcp_call's output string formatting from mcp_call_async dicts."""
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_success_with_text(self):
         """A successful call with text output produces a formatted [OK] line."""
@@ -125,7 +120,7 @@ class TestEndpointResolution(unittest.TestCase):
     """Tests for the X-MCP-Endpoint header -> endpoint resolution."""
 
     def _run(self, coro):
-        return asyncio.get_event_loop().run_until_complete(coro)
+        return asyncio.run(coro)
 
     def test_header_endpoint_passed_through(self):
         """The X-MCP-Endpoint header value is forwarded as the endpoint arg."""
