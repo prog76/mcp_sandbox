@@ -174,6 +174,14 @@ def _start_kernel(kernel_env: Optional[Dict[str, str]] = None) -> Any:
     return km, kc
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences — agents consume plain text."""
+    return _ANSI_RE.sub("", text)
+
+
 def _execute_sync(kc: Any, code: str, timeout: int = 120) -> str:
     try:
         reply = kc.execute(code, reply=True, timeout=timeout)
@@ -188,15 +196,16 @@ def _execute_sync(kc: Any, code: str, timeout: int = 120) -> str:
                     data = msg["content"].get("data", {})
                     if "text/plain" in data:
                         output_parts.append(data["text/plain"])
-                elif msg_type == "error":
-                    output_parts.append("\n".join(msg["content"].get("traceback", [])))
+                # NOTE: 'error' iopub messages are intentionally skipped —
+                # the execute reply carries the same traceback; taking both
+                # duplicated every error.
             except Exception:
                 break
         if reply["content"].get("status") == "error":
             errors = reply["content"].get("traceback", [])
             if errors:
                 output_parts.append("\n".join(errors))
-        return "".join(output_parts).strip()
+        return _strip_ansi("".join(output_parts)).strip()
     except Exception as e:
         return f"Error executing code: {e}"
 
