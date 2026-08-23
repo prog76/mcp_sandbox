@@ -136,6 +136,7 @@ def load_extensions_from_config(
             "core.mcp_call",
             "core.skill_mgmt",
             "core.introspection",
+            "core.jobs",
         ]
         log.info("No extensions specified in project.yaml, loading defaults")
 
