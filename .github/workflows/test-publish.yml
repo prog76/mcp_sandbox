@@ -9,7 +9,7 @@ on:
 
 env:
   PYTHON_VERSION: "3.12"
-  IMAGE: ghcr.io/prog76/mcp-ipybox
+  IMAGE: ghcr.io/prog76/mcp-sandbox
 
 jobs:
   test:
@@ -25,27 +25,6 @@ jobs:
           pip install -e .
       - name: Run tests
         run: python3 -m pytest -v
-
-  publish-pypi:
-    needs: test
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.ref_name, 'v')
-    permissions:
-      id-token: write  # trusted publishing (OIDC)
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - run: python -m pip install --upgrade pip
-      - run: pip install build
-      - run: python -m build
-      - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          print-hash: true
-      - name: Show built artifacts
-        run: ls -la dist/
 
   publish-image:
     needs: test
