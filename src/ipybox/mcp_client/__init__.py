@@ -214,16 +214,16 @@ async def mcp_list_actions_async(upstream: str, endpoint: Optional[str] = None) 
     return "\n".join(lines)
 
 
-async def mcp_describe_async(action_id: str, upstream: Optional[str] = None, endpoint: Optional[str] = None) -> str:
+async def mcp_describe_async(action: str, upstream: Optional[str] = None, endpoint: Optional[str] = None) -> str:
     """Describe an MCP action's parameters and schema.
 
     Args:
-        action_id: Action name/suffix (e.g. 'terminal_exec', 'pods_get') or a
+        action: Action name/suffix (e.g. 'terminal_exec', 'pods_get') or a
             full proxied id (e.g. 'vscode_terminal_exec') when ``upstream`` is
-            omitted. If ``upstream`` is given, ``action_id`` is treated as the
+            omitted. If ``upstream`` is given, ``action`` is treated as the
             unprefixed action name (or a full id that must belong to upstream).
         upstream: Optional upstream/backend prefix used to disambiguate an
-            unprefixed ``action_id``.
+            unprefixed ``action``.
         endpoint: MCP endpoint URL.
     """
     ep = _endpoint(endpoint)
@@ -231,14 +231,14 @@ async def mcp_describe_async(action_id: str, upstream: Optional[str] = None, end
 
     tool_names = [t.get("name") for t in tools if t.get("name")]
     try:
-        resolved = _resolve_action_id(upstream, action_id, tool_names)
+        resolved = _resolve_action_id(upstream, action, tool_names)
     except ValueError as e:
         return f"Error: {e}"
 
     by_name = {t.get("name"): t for t in tools if t.get("name")}
     tool = by_name.get(resolved)
     if not tool:
-        return f"Error: Action '{action_id}' not found."
+        return f"Error: Action '{action}' not found."
 
     return format_tool_schema(tool)
 

@@ -130,7 +130,7 @@ class TestAddressingModes(unittest.TestCase):
 
     # -- mcp_describe (both forms) ---------------------------------------
 
-    def _describe(self, action_id=None, upstream=None):
+    def _describe(self, action=None, upstream=None):
         async def fake_fetch(endpoint=None, cache_dir=None, cache_ttl_s=None):
             return [{"name": n} for n in self._TOOL_NAMES]
         def fake_format(tool):  # format_tool_schema is imported into the module (called synchronously)
@@ -140,23 +140,23 @@ class TestAddressingModes(unittest.TestCase):
         mcp_client.fetch_tool_list_async = fake_fetch
         mcp_client.format_tool_schema = fake_format
         try:
-            return asyncio.run(mcp_client.mcp_describe_async(action_id=action_id, upstream=upstream, endpoint="x"))
+            return asyncio.run(mcp_client.mcp_describe_async(action=action, upstream=upstream, endpoint="x"))
         finally:
             mcp_client.fetch_tool_list_async = orig_fetch
             mcp_client.format_tool_schema = orig_format
 
     def test_describe_combined_form(self):
-        self.assertIn("vscode_terminal_exec", self._describe(action_id="vscode_terminal_exec"))
+        self.assertIn("vscode_terminal_exec", self._describe(action="vscode_terminal_exec"))
 
     def test_describe_split_uses_upstream_to_resolve(self):
-        self.assertIn("vscode_terminal_exec", self._describe(action_id="terminal_exec", upstream="vscode"))
+        self.assertIn("vscode_terminal_exec", self._describe(action="terminal_exec", upstream="vscode"))
 
     def test_describe_wrong_upstream_errors(self):
-        d = self._describe(action_id="terminal_exec", upstream="k8s")
+        d = self._describe(action="terminal_exec", upstream="k8s")
         self.assertTrue(d.startswith("Error"))
 
     def test_describe_unprefixed_without_upstream_errors(self):
-        d = self._describe(action_id="terminal_exec")
+        d = self._describe(action="terminal_exec")
         self.assertTrue(d.startswith("Error"))
 
     # -- mcp_list_actions (unprefixed output) ----------------------------
