@@ -35,8 +35,22 @@ def _sync(coro):
 def register(registry):
     """Register the synchronous MCP call helpers."""
 
-    def mcp_call(upstream, action, arguments=None, stdin=None, timeout=None, endpoint=None):
+    def mcp_call(upstream=None, action=None, arguments=None, stdin=None, timeout=None, endpoint=None):
         """Synchronously call any MCP action with structured JSON arguments.
+
+        Both addressing conventions are accepted and resolve to the same
+        upstream tool:
+
+          * ``mcp_call(upstream, action, arguments, ...)`` — split form
+            (e.g. ``mcp_call('k8s', 'pods_get', {...})``), which is the only
+            way to unambiguously target a bare/unprefixed action name.
+          * ``mcp_call(action, arguments, ...)`` — combined form where
+            ``action`` is the full proxied id (e.g. ``mcp_call('k8s_pods_get',
+            {...})``). ``upstream`` may be omitted because the full id already
+            names the upstream; when omitted it is inferred from the id.
+
+        If ``upstream`` is given and ``action`` is a full id, that id must
+        belong to ``upstream`` (a mismatch is an error, never silently fixed).
 
         Returns a dict with keys ``ok``, ``is_error``, ``upstream``, ``action``,
         ``text``, ``content`` and ``structured_content``. On tool-resolution
@@ -53,7 +67,7 @@ def register(registry):
             )
         )
 
-    def mcp_call_text(upstream, action, arguments=None, stdin=None, timeout=None, endpoint=None):
+    def mcp_call_text(upstream=None, action=None, arguments=None, stdin=None, timeout=None, endpoint=None):
         """Call an MCP action and return only the text payload."""
         result = mcp_call(upstream, action, arguments, stdin, timeout, endpoint)
         return result["text"] if isinstance(result, dict) else str(result)
@@ -66,9 +80,14 @@ def register(registry):
         """List actions (tools) for a specific upstream."""
         return _sync(mcp_client.mcp_list_actions_async(upstream=upstream, endpoint=endpoint))
 
-    def mcp_describe(action_id, endpoint=None):
-        """Describe an MCP action's schema."""
-        return _sync(mcp_client.mcp_describe_async(action_id=action_id, endpoint=endpoint))
+    def mcp_describe(action_id=None, upstream=None, endpoint=None):
+        """Describe an MCP action's schema.
+
+        Accepts either a full proxied id (``mcp_describe('k8s_pods_get')``) or,
+        with ``upstream``, an unprefixed action name to disambiguate
+        (``mcp_describe(upstream='k8s', action_id='pods_get')``).
+        """
+        return _sync(mcp_client.mcp_describe_async(action_id=action_id, upstream=upstream, endpoint=endpoint))
 
     registry.add("mcp_call", mcp_call,
                  description="Synchronously call any MCP action", category="core")

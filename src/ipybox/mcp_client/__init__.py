@@ -31,7 +31,6 @@ from mcp2cli.client import (
     _format_tool_call_error,
     fetch_tool_list_async,
     format_tool_schema,
-    resolve_tool_id,
 )
 
 __version__ = "0.1.0"
@@ -122,10 +121,72 @@ async def mcp_list_upstreams_async(endpoint: Optional[str] = None) -> str:
     return "Available MCP upstreams:\n" + "\n".join(f"- {s}" for s in sorted(upstreams))
 
 
+def _resolve_action_id(upstream, action, tool_names):
+    """Resolve a tool id from the split and/or combined addressing forms.
+
+    Both conventions are accepted and normalise to the same upstream tool id,
+    so ``mcp_call`` and ``mcp_describe`` agree on how a downstream action is
+    addressed:
+
+    - Split form: ``upstream`` + ``action`` (e.g. ``'k8s'``, ``'pods_get'``).
+    - Combined form: ``action`` is a full proxied id (e.g. ``'k8s_pods_get'``).
+
+    Resolution rules (deterministic, never silently guesses):
+
+      * ``upstream`` given, ``action`` is an existing full id
+          - belonging to ``upstream``  -> that id
+          - belonging to *another*    -> ``ValueError`` (mismatch, no silent fix)
+      * ``upstream`` given, ``f"{upstream}_{action}"`` exists -> that id
+      * ``upstream`` omitted, ``action`` is an existing full id -> that id
+      * anything else                -> ``ValueError``
+          (notably an unprefixed ``action`` with no ``upstream`` when the
+          endpoint prefixes tools, or an action that does not belong to the
+          given upstream — we never fall back to mcp2cli's fuzzy suffix match)
+
+    Notes:
+    - Unprefixed/bare names have no special handling in the multiplexed
+      (compound/gateway) case: a bare name is not a full id, so without an
+      ``upstream`` it cannot be resolved. Skills that mention a tool without
+      its prefix must pass ``upstream`` (or the code must use a direct
+      non-prefixed endpoint).
+    - ``tool_names`` should carry every proxied id the endpoint exposes.
+    """
+    if action is None:
+        return None
+
+    if upstream:
+        if action in tool_names:
+            # Full proxied id supplied. Trust it only if it belongs to the
+            # requested upstream; never let a foreign id ride along silently.
+            expected = f"{upstream}_"
+            if action.startswith(expected):
+                return action
+            raise ValueError(
+                f"Action '{action}' does not belong to upstream '{upstream}'."
+            )
+        candidate = f"{upstream}_{action}"
+        if candidate in tool_names:
+            return candidate
+        raise ValueError(
+            f"Action '{action}' not found under upstream '{upstream}'. "
+            "Use mcp_list_actions(upstream) to see available unprefixed names, "
+            "or pass the full proxied id (e.g. '<upstream>_<action>')."
+        )
+
+    if action in tool_names:
+        return action
+    raise ValueError(
+        f"Action '{action}' not found. "
+        "Pass the full proxied id (e.g. '<upstream>_<action>') or supply "
+        "upstream=<prefix> for an unprefixed action name (see "
+        "mcp_list_upstreams() / mcp_list_actions(upstream))."
+    )
+
+
 async def mcp_list_actions_async(upstream: str, endpoint: Optional[str] = None) -> str:
     """List actions (tools) for a specific MCP upstream.
 
-    Args:
+    Arg:
         upstream: Upstream prefix (e.g. 'exec', 'ipybox', 'k8s').
         endpoint: MCP endpoint URL (defaults to MCP_ENDPOINT env or DEFAULT_ENDPOINT).
     """
@@ -143,17 +204,26 @@ async def mcp_list_actions_async(upstream: str, endpoint: Optional[str] = None) 
 
     matched.sort(key=lambda x: x[0])
     lines = [f"{upstream}/"]
+    # Expose the unprefixed action name (the tool id minus the upstream
+    # prefix). This matches what skills/reusable code reference a tool by and
+    # what mcp_describe(upstream=..., action=...) accepts.
     for tool_name, desc in matched:
         desc_short = desc.strip().splitlines()[0] if desc else ""
-        lines.append(f"- {tool_name}  {desc_short}")
+        action_name = tool_name.split("_", 1)[1] if "_" in tool_name else tool_name
+        lines.append(f"- {action_name}  {desc_short}")
     return "\n".join(lines)
 
 
-async def mcp_describe_async(action_id: str, endpoint: Optional[str] = None) -> str:
+async def mcp_describe_async(action_id: str, upstream: Optional[str] = None, endpoint: Optional[str] = None) -> str:
     """Describe an MCP action's parameters and schema.
 
     Args:
-        action_id: Full action ID (e.g. 'exec_run') or unprefixed name (e.g. 'run').
+        action_id: Action name/suffix (e.g. 'terminal_exec', 'pods_get') or a
+            full proxied id (e.g. 'vscode_terminal_exec') when ``upstream`` is
+            omitted. If ``upstream`` is given, ``action_id`` is treated as the
+            unprefixed action name (or a full id that must belong to upstream).
+        upstream: Optional upstream/backend prefix used to disambiguate an
+            unprefixed ``action_id``.
         endpoint: MCP endpoint URL.
     """
     ep = _endpoint(endpoint)
@@ -161,7 +231,7 @@ async def mcp_describe_async(action_id: str, endpoint: Optional[str] = None) -> 
 
     tool_names = [t.get("name") for t in tools if t.get("name")]
     try:
-        resolved = resolve_tool_id(action_id, tool_names)
+        resolved = _resolve_action_id(upstream, action_id, tool_names)
     except ValueError as e:
         return f"Error: {e}"
 
@@ -223,9 +293,9 @@ def _error_result(upstream, action, message):
 
 
 async def mcp_call_async(
-    upstream: str,
-    action: str,
-    arguments: Dict[str, Any],
+    upstream: Optional[str] = None,
+    action: Optional[str] = None,
+    arguments: Dict[str, Any] = None,
     stdin: Optional[str] = None,
     timeout: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
     endpoint: Optional[str] = None,
@@ -233,33 +303,38 @@ async def mcp_call_async(
     """Call any MCP action with structured JSON arguments.
 
     Args:
-        upstream: Upstream prefix (e.g. 'exec', 'k8s').
-        action: Action name (e.g. 'run', 'pods_list').
+        upstream: Optional upstream prefix used to disambiguate an unprefixed
+            ``action`` (e.g. 'exec', 'k8s'). When omitted, ``action`` must be a
+            full proxied id (e.g. 'vscode_terminal_exec').
+        action: Action name — either an unprefixed name (belonging to
+            ``upstream``) or a full proxied id. If ``upstream`` is given and
+            ``action`` is a full id, it must belong to ``upstream``.
         arguments: Action parameters as a dict.
         stdin: Optional content to pass as stdin.
         timeout: Timeout in seconds.
         endpoint: MCP endpoint URL.
+        ctx: (unused, compatibility).
 
     Returns:
         A structured dict (see _build_call_result): ``ok``, ``is_error``,
         ``upstream``, ``action``, ``text`` (combined plain-text payload),
         ``content`` (raw blocks), and ``structured_content`` (when present).
-        On failure ``ok`` is False and ``text`` carries the error message.
+        On resolution failure ``ok`` is False and ``text`` carries the error
+        message (a string error is returned only if ``upstream`` could not be
+        inferred from ``action``).
     """
     ep = _endpoint(endpoint)
     tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
     tool_names = [t.get("name") for t in tools if t.get("name")]
 
-    resolved_tool_id = None
-    for candidate in (f"{upstream}_{action}", action):
-        if candidate in tool_names:
-            resolved_tool_id = candidate
-            break
+    try:
+        resolved_tool_id = _resolve_action_id(upstream, action, tool_names)
+    except ValueError as e:
+        return f"Error: {e}"
     if resolved_tool_id is None:
-        try:
-            resolved_tool_id = resolve_tool_id(action, tool_names)
-        except ValueError as e:
-            return f"Error: {e}"
+        return "Error: Action not provided (pass action=..., optionally with upstream=...)."
+    if upstream is None:
+        upstream = resolved_tool_id.split("_", 1)[0]
 
     call_args = dict(arguments) if arguments else {}
     if stdin is not None:
@@ -268,12 +343,12 @@ async def mcp_call_async(
     try:
         out_obj = await asyncio.wait_for(
             _call_tool_live(endpoint=ep, tool_id=resolved_tool_id, arguments=call_args),
-            timeout=timeout,
+            timeout=timeout or DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
         return _build_call_result(out_obj, upstream, resolved_tool_id)
     except Exception as e:
         return _error_result(
             upstream,
             resolved_tool_id,
-            _format_tool_call_error(resolved_tool_id, ep, timeout, e),
+            _format_tool_call_error(resolved_tool_id, ep, timeout or DEFAULT_TOOL_TIMEOUT_SECONDS, e),
         )
