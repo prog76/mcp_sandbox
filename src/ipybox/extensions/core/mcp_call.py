@@ -80,14 +80,14 @@ def register(registry):
         """List actions (tools) for a specific upstream."""
         return _sync(mcp_client.mcp_list_actions_async(upstream=upstream, endpoint=endpoint))
 
-    def mcp_describe(action_id=None, upstream=None, endpoint=None):
+    def mcp_describe(action=None, upstream=None, endpoint=None):
         """Describe an MCP action's schema.
 
         Accepts either a full proxied id (``mcp_describe('k8s_pods_get')``) or,
         with ``upstream``, an unprefixed action name to disambiguate
-        (``mcp_describe(upstream='k8s', action_id='pods_get')``).
+        (``mcp_describe(upstream='k8s', action='pods_get')``).
         """
-        return _sync(mcp_client.mcp_describe_async(action_id=action_id, upstream=upstream, endpoint=endpoint))
+        return _sync(mcp_client.mcp_describe_async(action=action, upstream=upstream, endpoint=endpoint))
 
     registry.add("mcp_call", mcp_call,
                  description="Synchronously call any MCP action", category="core")
