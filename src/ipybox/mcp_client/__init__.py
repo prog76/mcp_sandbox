@@ -106,7 +106,11 @@ async def mcp_list_upstreams_async(endpoint: Optional[str] = None) -> str:
     Returns a formatted string listing upstream names.
     """
     ep = _endpoint(endpoint)
-    tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+
+    try:
+        tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+    except Exception as e:
+        return _format_tool_call_error('list_upstreams', ep, DEFAULT_TOOL_TIMEOUT_SECONDS, e)
 
     upstreams = set()
     for t in tools:
@@ -191,7 +195,11 @@ async def mcp_list_actions_async(upstream: str, endpoint: Optional[str] = None) 
         endpoint: MCP endpoint URL (defaults to MCP_ENDPOINT env or DEFAULT_ENDPOINT).
     """
     ep = _endpoint(endpoint)
-    tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+
+    try:
+        tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+    except Exception as e:
+        return _format_tool_call_error('list_actions', ep, DEFAULT_TOOL_TIMEOUT_SECONDS, e)
 
     matched = []
     for t in tools:
@@ -227,8 +235,11 @@ async def mcp_describe_async(action: str, upstream: Optional[str] = None, endpoi
         endpoint: MCP endpoint URL.
     """
     ep = _endpoint(endpoint)
-    tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
 
+    try:
+        tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+    except Exception as e:
+        return _format_tool_call_error(action or '', ep, DEFAULT_TOOL_TIMEOUT_SECONDS, e)
     tool_names = [t.get("name") for t in tools if t.get("name")]
     try:
         resolved = _resolve_action_id(upstream, action, tool_names)
@@ -330,7 +341,15 @@ async def mcp_call_async(
         inferred from ``action``).
     """
     ep = _endpoint(endpoint)
-    tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+
+    try:
+        tools = await fetch_tool_list_async(endpoint=ep, cache_dir=_cache_dir(), cache_ttl_s=3600)
+    except Exception as e:
+        return _error_result(
+            upstream or '',
+            action or '',
+            _format_tool_call_error(str(action or upstream or ''), ep, timeout or DEFAULT_TOOL_TIMEOUT_SECONDS, e),
+        )
     tool_names = [t.get("name") for t in tools if t.get("name")]
 
     try:
