@@ -18,11 +18,31 @@ def _result(content, is_error=False, sc=None):
 
 class TestResultSchema(unittest.TestCase):
     def test_build_success(self):
+        # Single text block: content duplicates the joined text, so the
+        # de-duplication collapses it (message is kept once, in ``text``).
         r = mcp_client._build_call_result(_result([_text("NAME\nrow")]), "k8s", "k8s_nodes_top")
         self.assertTrue(r["ok"]); self.assertFalse(r["is_error"])
         self.assertEqual(r["text"], "NAME\nrow")
-        self.assertEqual(r["content"], [{"type": "text", "text": "NAME\nrow"}])
+        self.assertEqual(r["content"], [])
         self.assertIsNone(r["structured_content"])
+    def test_dedupe_fastmcp_string_wrap(self):
+        # fastmcp wraps plain-string tool results into content +
+        # structuredContent={"result": msg}; the message must be kept once.
+        msg = "ACCESS DENIED: Invalid target format"
+        r = mcp_client._build_call_result(
+            _result([_text(msg)], sc={"result": msg}), "browser", "browser_tabs_list")
+        self.assertEqual(r["text"], msg)
+        self.assertEqual(r["content"], [])
+        self.assertIsNone(r["structured_content"])
+    def test_content_kept_when_blocks_differ(self):
+        # Multiple distinct blocks carry information beyond the joined text.
+        r = mcp_client._build_call_result(_result([_text("a"), _text("b")]), "e", "x")
+        self.assertEqual(r["text"], "a\nb")
+        self.assertEqual(r["content"], [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}])
+    def test_structured_kept_when_it_adds_info(self):
+        sc = {"nodes": [{"name": "n1"}]}
+        r = mcp_client._build_call_result(_result([_text("t")], sc=sc), "k8s", "k")
+        self.assertEqual(r["structured_content"], sc)
     def test_join(self):
         self.assertEqual(mcp_client._build_call_result(_result([_text("a"), _text("b")]), "e", "x")["text"], "a\nb")
     def test_error(self):
