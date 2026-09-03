@@ -21,7 +21,7 @@ via the `execute_code` tool's kernel_env.
 import asyncio
 import contextvars
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Awaitable
 
 from mcp2cli.client import (
     DEFAULT_ENDPOINT,
@@ -299,6 +299,7 @@ async def mcp_call_async(
     stdin: Optional[str] = None,
     timeout: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
     endpoint: Optional[str] = None,
+    progress_callback: Optional[Callable[[float, Optional[float], Optional[str]], Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
     """Call any MCP action with structured JSON arguments.
 
@@ -314,6 +315,11 @@ async def mcp_call_async(
         timeout: Timeout in seconds.
         endpoint: MCP endpoint URL.
         ctx: (unused, compatibility).
+        progress_callback: Optional async callable invoked with
+            ``(progress, total, message)`` when the upstream server sends
+            progress notifications. When provided, the MCP client includes a
+            ``progressToken`` in the request so progress-capable backends
+            (e.g. ipybox's _keepalive during job_wait) emit notifications.
 
     Returns:
         A structured dict (see _build_call_result): ``ok``, ``is_error``,
@@ -342,7 +348,8 @@ async def mcp_call_async(
 
     try:
         out_obj = await asyncio.wait_for(
-            _call_tool_live(endpoint=ep, tool_id=resolved_tool_id, arguments=call_args),
+            _call_tool_live(endpoint=ep, tool_id=resolved_tool_id, arguments=call_args,
+                            progress_callback=progress_callback),
             timeout=timeout or DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
         return _build_call_result(out_obj, upstream, resolved_tool_id)
