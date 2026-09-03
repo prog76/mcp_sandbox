@@ -278,15 +278,28 @@ def _build_call_result(out_obj, upstream, action):
     """
     is_error = bool(getattr(out_obj, "isError", False))
     blocks = [_content_block_to_dict(c) for c in (getattr(out_obj, "content", None) or [])]
-    text_parts = [b["text"] for b in blocks if b.get("type") == "text"]
+    text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
+    structured = getattr(out_obj, "structuredContent", None)
+
+    # De-duplicate the payload: fastmcp wraps plain-string tool results into
+    # BOTH content=[TextContent(msg)] and structuredContent={"result": msg},
+    # so the same message would otherwise be carried three times (text,
+    # content[0].text, structured_content.result) and echo through every
+    # outer layer (execute_code, CLI).  Keep the message once in ``text``;
+    # drop content/structured only when they add no information.
+    if all(b.get("text") == text for b in blocks if b.get("type") == "text") and blocks:
+        blocks = []
+    if isinstance(structured, dict) and len(structured) == 1 and structured.get("result") == text:
+        structured = None
+
     return {
         "ok": not is_error,
         "is_error": is_error,
         "upstream": upstream,
         "action": action,
-        "text": "\n".join(text_parts),
+        "text": text,
         "content": blocks,
-        "structured_content": getattr(out_obj, "structuredContent", None),
+        "structured_content": structured,
     }
 
 
