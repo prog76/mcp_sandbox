@@ -29,7 +29,9 @@ python3 -m pytest test/ -v    # from repo root
 - Kernel output goes to LLM agents: keep it plain text — no ANSI codes, no long
   stack traces. If you touch output handling, see README "Kernel output policy".
 - The container rootfs is read-only; writable: `/var/mcp/skills`,
-  `/var/mcp/ipybox`, `/tmp` (tmpfs). Don't add code that writes elsewhere.
+  `/var/mcp/ipybox`, `/tmp` (tmpfs). Each new session also gets an isolated
+  fresh working dir under `/tmp/ipybox/<session>` (created on kernel start,
+  removed on idle reap). Don't add code that writes elsewhere.
 - Don't put secrets in this package — privileged ops go through the gateway's
   exec backend via `mcp_call`.
 

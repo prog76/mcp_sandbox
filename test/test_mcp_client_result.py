@@ -93,7 +93,7 @@ class TestAddressingModes(unittest.TestCase):
         captured = {}
         async def fake_fetch(endpoint=None, cache_dir=None, cache_ttl_s=None):
             return [{"name": n} for n in self._TOOL_NAMES]
-        async def fake_call(endpoint=None, tool_id=None, arguments=None):
+        async def fake_call(endpoint=None, tool_id=None, arguments=None, progress_callback=None):
             captured["tool_id"] = tool_id
             return types.SimpleNamespace(
                 content=[types.SimpleNamespace(type="text", text="OUT")],

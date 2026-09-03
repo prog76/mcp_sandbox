@@ -29,7 +29,11 @@ Kernel output is consumed by LLM agents, so it must be plain text:
 
 The container runs with a read-only root filesystem: writable locations are
 `/var/mcp/skills` (skills volume), `/var/mcp/ipybox` (IPython profile), and
-the `/tmp` tmpfs.
+the `/tmp` tmpfs. Each new session also gets an isolated, fresh working
+directory created under `/tmp/ipybox/<session>` (the kernel's CWD is set to
+that dir on start, and it is removed when the session is reaped on idle), so
+sessions never share a mutable CWD. Override the root with
+`IPYBOX_WORKDIR_BASE` if needed.
 
 ## Extensions
 

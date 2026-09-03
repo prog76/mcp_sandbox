@@ -152,6 +152,27 @@ class TestReapIdleSessions(unittest.TestCase):
         reaped = server._reap_idle_sessions(now=time.monotonic())
         self.assertEqual(reaped, [])
 
+    def test_reap_removes_workdir(self):
+        """Reaping a session also removes its per-session temp workdir."""
+        import tempfile
+        workdir = tempfile.mkdtemp(prefix="ipybox-test-workdir-")
+        self.assertTrue(os.path.isdir(workdir))
+        sid = "workdir-session"
+        session = self._make_session(
+            sid, time.monotonic() - server.IPYBOX_IDLE_TIMEOUT - 1
+        )
+        session.workdir = workdir
+        server._reap_idle_sessions(now=time.monotonic())
+        self.assertFalse(os.path.isdir(workdir))
+        self.assertNotIn(sid, server._kernels)
+
+    def test_reap_without_workdir_is_noop_for_cleanup(self):
+        """A session with no workdir is reaped normally (no rmtree path)."""
+        sid = "no-workdir-session"
+        self._make_session(sid, time.monotonic() - server.IPYBOX_IDLE_TIMEOUT - 1)
+        reaped = server._reap_idle_sessions(now=time.monotonic())
+        self.assertIn(sid, reaped)
+
 
 class TestSessionManager(unittest.TestCase):
     """Tests for _get_or_create_session."""
@@ -226,6 +247,139 @@ class TestStartKernelEnv(unittest.TestCase):
         _, sk_kwargs = km.start_kernel.call_args
         self.assertIn("env", sk_kwargs)  # parent os.environ copy
         self.assertNotIn("MCP_ENDPOINT", sk_kwargs["env"])
+
+
+class TestSessionWorkdirPath(unittest.TestCase):
+    """Tests for _session_workdir_path (pure, side-effect-free path computation)."""
+
+    def setUp(self):
+        self._orig_base = server._IPYBOX_WORKDIR_BASE
+        server._IPYBOX_WORKDIR_BASE = "/tmp/ipybox-test"
+
+    def tearDown(self):
+        server._IPYBOX_WORKDIR_BASE = self._orig_base
+
+    def test_under_ipybox_tmp_base(self):
+        path = server._session_workdir_path("abc")
+        self.assertTrue(path.startswith("/tmp/ipybox-test/"))
+
+    def test_same_session_id_is_stable(self):
+        self.assertEqual(
+            server._session_workdir_path("foo"),
+            server._session_workdir_path("foo"),
+        )
+
+    def test_different_session_ids_differ(self):
+        self.assertNotEqual(
+            server._session_workdir_path("s1"),
+            server._session_workdir_path("s2"),
+        )
+
+    def test_two_uuids_differ(self):
+        import uuid
+        u1 = str(uuid.uuid4())
+        u2 = str(uuid.uuid4())
+        self.assertNotEqual(
+            server._session_workdir_path(u1),
+            server._session_workdir_path(u2),
+        )
+
+    def test_sanitizes_unsafe_chars(self):
+        path = server._session_workdir_path("hello world/foo")
+        rel = path[len("/tmp/ipybox-test/"):]
+        self.assertNotIn(" ", rel)
+        self.assertNotIn("/", rel)
+
+    def test_path_traversal_neutralized(self):
+        path = server._session_workdir_path("../../etc")
+        self.assertNotIn("..", path)
+        self.assertTrue(path.startswith("/tmp/ipybox-test/"))
+
+    def test_env_override_base(self):
+        server._IPYBOX_WORKDIR_BASE = "/tmp/ipybox-custom"
+        path = server._session_workdir_path("sid")
+        self.assertTrue(path.startswith("/tmp/ipybox-custom/"))
+
+
+class TestStartKernelWorkdir(unittest.TestCase):
+    """Tests for _start_kernel workdir / cwd handling."""
+
+    def setUp(self):
+        self._orig_is_file = os.path.isfile
+        self._orig_startup = server._STARTUP_SCRIPT
+        server._STARTUP_SCRIPT = "/nonexistent/startup.py"
+        os.path.isfile = MagicMock(return_value=False)
+
+    def tearDown(self):
+        os.path.isfile = self._orig_is_file
+        server._STARTUP_SCRIPT = self._orig_startup
+
+    @patch("jupyter_client.KernelManager")
+    def test_workdir_creates_dir_and_passes_cwd(self, mock_km_cls):
+        """A workdir is created and forwarded as cwd= to start_kernel."""
+        km = MagicMock()
+        km.client.return_value = MagicMock()
+        mock_km_cls.return_value = km
+        workdir = "/tmp/ipybox-test-xyz"
+        with patch("os.makedirs") as mock_makedirs:
+            server._start_kernel({"K": "v"}, workdir=workdir)
+        mock_makedirs.assert_called_once_with(workdir, exist_ok=True)
+        _, sk_kwargs = km.start_kernel.call_args
+        self.assertEqual(sk_kwargs["cwd"], workdir)
+        self.assertEqual(sk_kwargs["env"]["K"], "v")
+
+    @patch("jupyter_client.KernelManager")
+    def test_no_workdir_no_makedirs_no_cwd(self, mock_km_cls):
+        """Without a workdir, no dir is created and cwd is not passed."""
+        km = MagicMock()
+        km.client.return_value = MagicMock()
+        mock_km_cls.return_value = km
+        with patch("os.makedirs") as mock_makedirs:
+            server._start_kernel({"K": "v"})
+        mock_makedirs.assert_not_called()
+        _, sk_kwargs = km.start_kernel.call_args
+        self.assertNotIn("cwd", sk_kwargs)
+        self.assertEqual(sk_kwargs["env"]["K"], "v")
+
+
+class TestSessionWorkdir(unittest.TestCase):
+    """Tests that _get_or_create_session wires up per-session workdirs."""
+
+    def setUp(self):
+        self._orig_kernels = server._kernels
+        self._orig_base = server._IPYBOX_WORKDIR_BASE
+        server._kernels = {}
+        server._IPYBOX_WORKDIR_BASE = "/tmp/ipybox-test"
+
+    def tearDown(self):
+        server._kernels = self._orig_kernels
+        server._IPYBOX_WORKDIR_BASE = self._orig_base
+
+    @patch("ipybox.kernel.mcp_server._start_kernel")
+    def test_new_session_gets_workdir(self, mock_start):
+        mock_start.return_value = (MagicMock(), MagicMock())
+        session = server._get_or_create_session("sess-1", None)
+        self.assertIsNotNone(session.workdir)
+        self.assertTrue(session.workdir.startswith("/tmp/ipybox-test/"))
+        _, kwargs = mock_start.call_args
+        self.assertEqual(kwargs["workdir"], session.workdir)
+
+    @patch("ipybox.kernel.mcp_server._start_kernel")
+    def test_reused_session_keeps_same_workdir(self, mock_start):
+        mock_start.return_value = (MagicMock(), MagicMock())
+        s1 = server._get_or_create_session("reused", None)
+        s2 = server._get_or_create_session("reused", None)
+        self.assertIs(s1, s2)
+        mock_start.assert_called_once()
+        self.assertEqual(s1.workdir, s2.workdir)
+
+    @patch("ipybox.kernel.mcp_server._start_kernel")
+    def test_distinct_sessions_get_distinct_workdirs(self, mock_start):
+        mock_start.return_value = (MagicMock(), MagicMock())
+        a = server._get_or_create_session("a", None)
+        b = server._get_or_create_session("b", None)
+        self.assertNotEqual(a.workdir, b.workdir)
+        self.assertEqual(mock_start.call_count, 2)
 
 
 if __name__ == "__main__":

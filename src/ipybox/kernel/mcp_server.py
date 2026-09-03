@@ -5,10 +5,12 @@ ipybox_mcp_server — MCP server that wraps stateful IPython kernels.
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -18,7 +20,7 @@ from typing import Any, Dict, Optional
 from fastmcp import FastMCP
 from fastmcp.server.context import Context as FastMCPContext
 
-from ipybox.kernel.extensions import get_registry
+from ipybox.kernel.templating import render_template_async
 from ipybox.mcp_client import (
     set_endpoint_override,
     reset_endpoint_override,
@@ -31,7 +33,6 @@ log = logging.getLogger("ipybox-mcp-server")
 mcp = FastMCP("ipybox")
 
 _PROMPTS_DIR = os.environ.get("IPYBOX_PROMPTS_DIR", "/var/mcp/skills/prompts")
-_TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]*)\)\s*\}\}")
 
 
 def _parse_frontmatter(text: str):
@@ -48,49 +49,8 @@ def _parse_frontmatter(text: str):
     return fm if isinstance(fm, dict) else {}, parts[2].lstrip("\n")
 
 
-def _parse_template_args(args_str: str) -> list:
-    if not args_str.strip():
-        return []
-    try:
-        import ast
-        parsed = ast.literal_eval("[" + args_str + "]")
-        if isinstance(parsed, list):
-            return parsed
-    except Exception:
-        pass
-    out = []
-    for tok in args_str.split(","):
-        tok = tok.strip()
-        if len(tok) >= 2 and tok[0] in ("'", '"') and tok[-1] == tok[0]:
-            tok = tok[1:-1]
-        out.append(tok)
-    return out
-
-
 async def _render_prompt(text: str) -> str:
-    registry = get_registry()
-    out = []
-    last = 0
-    for m in _TEMPLATE_RE.finditer(text):
-        out.append(text[last:m.start()])
-        name = m.group(1)
-        args_str = m.group(2)
-        fn = registry.get(name)
-        if fn is None:
-            out.append(m.group(0))
-        else:
-            try:
-                args = _parse_template_args(args_str)
-                result = fn(*args)
-                if asyncio.iscoroutine(result):
-                    result = await result
-                out.append(str(result))
-            except Exception as e:
-                log.warning("Template call %s(%s) failed: %s", name, args_str, e)
-                out.append(f"[template error: {name}({args_str})]")
-        last = m.end()
-    out.append(text[last:])
-    return "".join(out)
+    return await render_template_async(text)
 
 
 def _make_prompt(path: str, body: str):
@@ -155,14 +115,44 @@ _STARTUP_SCRIPT = os.environ.get(
     "/root/.ipython/profile_default/startup/00_autoimport.py",
 )
 
+# Per-session working directory root. Each new session gets its own temp
+# folder under here so kernels don't share a mutable CWD. The container mounts
+# /tmp as a tmpfs and ships a read-only rootfs, so this stays writable + RAM.
+_IPYBOX_WORKDIR_BASE = os.environ.get("IPYBOX_WORKDIR_BASE", "/tmp/ipybox")
 
-def _start_kernel(kernel_env: Optional[Dict[str, str]] = None) -> Any:
+
+def _session_workdir_path(session_id: str) -> str:
+    """Compute (but do NOT create) a per-session working directory path.
+
+    The directory is created lazily by :func:`_start_kernel` so that this
+    function stays side-effect-free — important for testability, since
+    :func:`_get_or_create_session` is exercised in unit tests with a mocked
+    ``_start_kernel``.
+
+    The session id is sanitized and suffixed with a short digest so the path
+    is filesystem-safe and unique regardless of the session id's characters
+    (which may originate from an HTTP header / MCP_SESSION_ID and contain
+    arbitrary content, including path-traversal attempts).
+    """
+    sid = str(session_id)
+    safe = re.sub(r"[^a-zA-Z0-9._-]", "-", sid).strip(".-") or "session"
+    digest = hashlib.sha1(sid.encode("utf-8")).hexdigest()[:8]
+    return os.path.join(_IPYBOX_WORKDIR_BASE, f"{safe[:80]}-{digest}")
+
+
+def _start_kernel(kernel_env: Optional[Dict[str, str]] = None, workdir: Optional[str] = None) -> Any:
     import jupyter_client
     env = os.environ.copy()
     if kernel_env:
         env.update({str(k): str(v) for k, v in kernel_env.items()})
     km = jupyter_client.KernelManager(kernel_name="python3")
-    km.start_kernel(env=env)
+    if workdir:
+        # Give this session an isolated, writable scratch dir. /tmp is a tmpfs
+        # in the container; makedirs also creates the base if missing.
+        os.makedirs(workdir, exist_ok=True)
+        km.start_kernel(env=env, cwd=workdir)
+    else:
+        km.start_kernel(env=env)
     kc = km.client()
     kc.wait_for_ready(timeout=30)
     if os.path.isfile(_STARTUP_SCRIPT):
@@ -257,6 +247,7 @@ class KernelSession:
     km: Any
     kc: Any
     env: Dict[str, str] = field(default_factory=dict)
+    workdir: Optional[str] = None
     last_used: float = field(default_factory=time.monotonic)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -282,10 +273,14 @@ def _get_or_create_session(session_id: str, kernel_env: Optional[Dict[str, str]]
         session = _kernels.get(session_id)
         if session is None:
             env = dict(kernel_env or {})
-            km, kc = _start_kernel(env)
-            session = KernelSession(km=km, kc=kc, env=env)
+            workdir = _session_workdir_path(session_id)
+            km, kc = _start_kernel(env, workdir=workdir)
+            session = KernelSession(km=km, kc=kc, env=env, workdir=workdir)
             _kernels[session_id] = session
-            log.info("Started new ipybox session %s (%d active)", session_id[:8], len(_kernels))
+            log.info(
+                "Started new ipybox session %s in %s (%d active)",
+                session_id[:8], workdir, len(_kernels),
+            )
         return session
 
 
@@ -307,6 +302,10 @@ def _reap_idle_sessions(now: Optional[float] = None) -> list:
                 session.km.shutdown_kernel(now=True)
             except Exception:
                 pass
+            if session.workdir:
+                # Best-effort cleanup of the per-session temp dir; never block
+                # reaping on a failed rmtree.
+                shutil.rmtree(session.workdir, ignore_errors=True)
             reaped.append(sid)
             log.info("Reaped idle ipykernel session %s (idle %.0fs)", sid[:8], idle_for)
     return reaped

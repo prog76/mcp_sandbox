@@ -3,6 +3,8 @@
 import os
 import yaml
 
+from ipybox.kernel.templating import render_template
+
 
 def register(registry):
     """Register skill management helpers."""
@@ -88,7 +90,7 @@ def register(registry):
             if os.path.isfile(c):
                 try:
                     with open(c) as f:
-                        return f.read()
+                        return render_template(f.read())
                 except Exception as e:
                     return f"Error reading skill '{name}': {e}"
 
@@ -100,7 +102,7 @@ def register(registry):
                 if f.endswith(".md") and f[:-3] == bare:
                     try:
                         with open(os.path.join(root, f)) as fh:
-                            return fh.read()
+                            return render_template(fh.read())
                     except Exception as e:
                         return f"Error reading skill '{name}': {e}"
 
