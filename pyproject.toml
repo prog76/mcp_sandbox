@@ -12,8 +12,8 @@ dependencies = [
     "ipykernel>=6.0",
     "ipython>=8.0",
     "ijson>=3.0",
-    "mcp>=1.26.0",
-    "fastmcp>=2.0.0",
+    "mcp>=1.28.1,<2",
+    "fastmcp>=3.4.2,<4",
     "pyyaml>=6.0",
     "mcp2cli @ git+https://github.com/prog76/mcp_mcp2cli.git",
 ]
