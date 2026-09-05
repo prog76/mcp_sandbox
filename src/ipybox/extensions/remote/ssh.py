@@ -55,8 +55,38 @@ def _ssh_opts(machine):
 def register(registry):
     """Register SSH helpers."""
 
+    def _exec_run(registry, cmd, env, timeout=60, stdin=None):
+        """Call the exec backend `run` via mcp_call and return the machine payload.
+
+        Returns the downstream structured_content dict when available, else a
+        normalized error dict so callers always get JSON-friendly fields.
+        """
+        mcp_call = registry.get("mcp_call")
+        if mcp_call is None:
+            return {"ok": False, "error": "mcp_call not registered"}
+        result = mcp_call(
+            "exec", "run",
+            {"command": cmd, "binary": cmd[0], "env": env or {}, "cwd": None,
+             "timeout": timeout, "stdin": stdin},
+        )
+        if not isinstance(result, dict):
+            return {"ok": False, "error": str(result), "exit_code": None,
+                    "stdout": "", "stderr": "", "timed_out": False}
+        sc = result.get("structured_content")
+        if isinstance(sc, dict) and "ok" in sc:
+            return sc
+        # No structured payload (e.g. policy denial surfaced as text): normalize.
+        text = result.get("text", "")
+        ok = bool(result.get("ok", False))
+        return {"ok": ok, "error": None if ok else text, "exit_code": None,
+                "stdout": text if ok else "", "stderr": "", "timed_out": False}
+
     def ssh_execute(machine, binary, args=None, sudo=False, timeout=60):
-        """Run a whitelisted binary on a remote machine via SSH."""
+        """Run a whitelisted binary on a remote machine via SSH.
+
+        Returns a machine-readable dict:
+        {tool, machine, binary, sudo, ok, exit_code, stdout, stderr, timed_out, error}.
+        """
         b = _validate_remote_binary(binary)
         if args is None:
             safe_args = []
@@ -73,13 +103,26 @@ def register(registry):
 
         cmd = ["ssh", *_ssh_opts(machine), str(machine), remote_cmd]
         env = {"REMOTE_BIN": b, "SSH_SUDO": "1" if sudo else "0"}
-        exec_run = registry.get("exec_run")
-        if exec_run is None:
-            return "Error: exec_run not registered"
-        return exec_run(cmd, env=env, timeout=timeout)
+        res = _exec_run(registry, cmd, env, timeout=timeout)
+        return {
+            "tool": "ssh_execute",
+            "machine": str(machine),
+            "binary": b,
+            "sudo": bool(sudo),
+            "ok": bool(res.get("ok", False)),
+            "exit_code": res.get("exit_code"),
+            "stdout": res.get("stdout", ""),
+            "stderr": res.get("stderr", ""),
+            "timed_out": bool(res.get("timed_out", False)),
+            "error": res.get("error"),
+        }
 
     def ssh_execute_background(machine, binary, args=None, duration=60):
-        """Run a whitelisted binary on a remote machine in the background."""
+        """Run a whitelisted binary on a remote machine in the background.
+
+        Returns a machine-readable dict:
+        {tool, machine, binary, started, duration, log, ok, error}.
+        """
         b = _validate_remote_binary(binary)
         if args is None:
             safe_args = []
@@ -96,35 +139,47 @@ def register(registry):
         )
         cmd = ["ssh", "-f", "-n", *_ssh_opts(machine), str(machine), remote]
         env = {"REMOTE_BIN": b, "SSH_SUDO": "0"}
-        exec_run = registry.get("exec_run")
-        if exec_run is None:
-            return "Error: exec_run not registered"
-        try:
-            exec_run(cmd, env=env, timeout=SSH_BG_EXEC_TIMEOUT)
-            return f"Background process started on {machine}: {b} (auto-stop in ~{d}s). Log: /tmp/{b}.log"
-        except Exception as e:
-            return f"Error: {e}"
+        res = _exec_run(registry, cmd, env, timeout=SSH_BG_EXEC_TIMEOUT)
+        return {
+            "tool": "ssh_execute_background",
+            "machine": str(machine),
+            "binary": b,
+            "started": bool(res.get("ok", False)),
+            "duration": d,
+            "log": f"/tmp/{b}.log",
+            "ok": bool(res.get("ok", False)),
+            "error": res.get("error"),
+        }
 
     def ssh_ensure_file(machine, binary):
-        """Upload /opt/tools/<binary> to /tmp/<binary> on remote host."""
+        """Upload /opt/tools/<binary> to /tmp/<binary> on remote host.
+
+        Returns a machine-readable dict:
+        {tool, machine, binary, uploaded, ok, error}.
+        """
         b = _validate_remote_binary(binary)
-        exec_run = registry.get("exec_run")
-        if exec_run is None:
-            return "Error: exec_run not registered"
+        ssh_opts = _ssh_opts(machine)
 
-        scp_opts = [
-            "-o", "BatchMode=yes",
-        ]
-        scp_cmd = ["scp", *_ssh_opts(machine), *scp_opts,
+        scp_cmd = ["scp", "-o", "BatchMode=yes", *ssh_opts,
                    f"{TOOLS_DIR}/{b}", f"{machine}:/tmp/{b}"]
-        exec_run(scp_cmd, env={"REMOTE_BIN": b, "SSH_SUDO": "0", "SSH_UPLOAD": "1"},
-                 timeout=SSH_UPLOAD_TIMEOUT)
+        r1 = _exec_run(registry, scp_cmd,
+                       {"REMOTE_BIN": b, "SSH_SUDO": "0", "SSH_UPLOAD": "1"},
+                       timeout=SSH_UPLOAD_TIMEOUT)
+        if not r1.get("ok"):
+            return {"tool": "ssh_ensure_file", "machine": str(machine), "binary": b,
+                    "uploaded": None, "ok": False, "error": r1.get("error"),
+                    "step": "scp"}
 
-        chmod_cmd = ["ssh", *_ssh_opts(machine),
-                     str(machine), f"chmod +x /tmp/{b}"]
-        exec_run(chmod_cmd, env={"REMOTE_BIN": "chmod", "SSH_SUDO": "0", "SSH_UPLOAD": "1"},
-                 timeout=30)
-        return f"Binary '{b}' ready on {machine} at /tmp/{b}"
+        chmod_cmd = ["ssh", *ssh_opts, str(machine), f"chmod +x /tmp/{b}"]
+        r2 = _exec_run(registry, chmod_cmd,
+                       {"REMOTE_BIN": "chmod", "SSH_SUDO": "0", "SSH_UPLOAD": "1"},
+                       timeout=30)
+        if not r2.get("ok"):
+            return {"tool": "ssh_ensure_file", "machine": str(machine), "binary": b,
+                    "uploaded": None, "ok": False, "error": r2.get("error"),
+                    "step": "chmod"}
+        return {"tool": "ssh_ensure_file", "machine": str(machine), "binary": b,
+                "uploaded": f"/tmp/{b}", "ok": True, "error": None, "step": None}
 
     registry.add("ssh_execute", ssh_execute, description="Run a command via SSH", category="remote")
     registry.add("ssh_execute_background", ssh_execute_background,
