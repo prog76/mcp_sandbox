@@ -28,6 +28,30 @@ def _validate_remote_binary(binary):
     return b
 
 
+def _ssh_opts(machine):
+    """Build the common SSH/scp option prefix.
+
+    Reads SSH_USER and SSH_KEY_PATH from the environment (injected by the
+    gateway policy at deploy time) and translates them into -l / -i flags
+    so that OpenSSH uses the correct remote user and identity file even
+    when the machine string is a bare IP without a user prefix.
+    """
+    opts = [
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=15",
+        "-o", "ServerAliveInterval=10",
+        "-o", "LogLevel=ERROR",
+    ]
+    ssh_key_path = os.environ.get("SSH_KEY_PATH", "").strip()
+    if ssh_key_path:
+        opts.extend(["-i", ssh_key_path])
+    ssh_user = os.environ.get("SSH_USER", "").strip()
+    if ssh_user and "@" not in str(machine):
+        opts.extend(["-l", ssh_user])
+    return opts
+
+
 def register(registry):
     """Register SSH helpers."""
 
@@ -47,13 +71,7 @@ def register(registry):
         else:
             remote_cmd = f"bash -c {shlex.quote(remote)} 2>&1"
 
-        cmd = [
-            "ssh", "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=10",
-            "-o", "LogLevel=ERROR",
-            str(machine), remote_cmd,
-        ]
+        cmd = ["ssh", *_ssh_opts(machine), str(machine), remote_cmd]
         env = {"REMOTE_BIN": b, "SSH_SUDO": "1" if sudo else "0"}
         exec_run = registry.get("exec_run")
         if exec_run is None:
@@ -76,14 +94,7 @@ def register(registry):
             + " ".join(shlex.quote(a) for a in safe_args)
             + f' >/tmp/{b}.log 2>&1'
         )
-        cmd = [
-            "ssh", "-f", "-n",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=15", "-o", "ServerAliveInterval=10",
-            "-o", "LogLevel=ERROR",
-            str(machine), remote,
-        ]
+        cmd = ["ssh", "-f", "-n", *_ssh_opts(machine), str(machine), remote]
         env = {"REMOTE_BIN": b, "SSH_SUDO": "0"}
         exec_run = registry.get("exec_run")
         if exec_run is None:
@@ -101,22 +112,16 @@ def register(registry):
         if exec_run is None:
             return "Error: exec_run not registered"
 
-        scp_cmd = [
-            "scp", "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=15", "-o", "BatchMode=yes",
-            "-o", "LogLevel=ERROR",
-            f"{TOOLS_DIR}/{b}", f"{machine}:/tmp/{b}",
+        scp_opts = [
+            "-o", "BatchMode=yes",
         ]
+        scp_cmd = ["scp", *_ssh_opts(machine), *scp_opts,
+                   f"{TOOLS_DIR}/{b}", f"{machine}:/tmp/{b}"]
         exec_run(scp_cmd, env={"REMOTE_BIN": b, "SSH_SUDO": "0", "SSH_UPLOAD": "1"},
                  timeout=SSH_UPLOAD_TIMEOUT)
 
-        chmod_cmd = [
-            "ssh", "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=15", "-o", "LogLevel=ERROR",
-            str(machine), f"chmod +x /tmp/{b}",
-        ]
+        chmod_cmd = ["ssh", *_ssh_opts(machine),
+                     str(machine), f"chmod +x /tmp/{b}"]
         exec_run(chmod_cmd, env={"REMOTE_BIN": "chmod", "SSH_SUDO": "0", "SSH_UPLOAD": "1"},
                  timeout=30)
         return f"Binary '{b}' ready on {machine} at /tmp/{b}"
