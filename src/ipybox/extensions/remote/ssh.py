@@ -32,9 +32,14 @@ def _ssh_opts(machine):
     """Build the common SSH/scp option prefix.
 
     Reads SSH_USER and SSH_KEY_PATH from the environment (injected by the
-    gateway policy at deploy time) and translates them into -l / -i flags
-    so that OpenSSH uses the correct remote user and identity file even
-    when the machine string is a bare IP without a user prefix.
+    gateway policy at deploy time) and translates them into -o User / -i
+    flags so that OpenSSH uses the correct remote user and identity file
+    even when the machine string is a bare IP without a user prefix.
+
+    `-o User=...` is used instead of `-l ...` because the same prefix is
+    shared with scp: in scp, `-l` means *bandwidth limit* (Kbit/s), not
+    login user, so `-l` broke every ssh_ensure_file upload with a usage
+    error. `-o User=` is valid for both ssh and scp.
     """
     opts = [
         "-o", "StrictHostKeyChecking=no",
@@ -48,7 +53,7 @@ def _ssh_opts(machine):
         opts.extend(["-i", ssh_key_path])
     ssh_user = os.environ.get("SSH_USER", "").strip()
     if ssh_user and "@" not in str(machine):
-        opts.extend(["-l", ssh_user])
+        opts.extend(["-o", f"User={ssh_user}"])
     return opts
 
 
