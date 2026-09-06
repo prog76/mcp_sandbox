@@ -11,8 +11,10 @@ These tests are designed for THREE environments:
    asserted and the liveness/capture logic is exercised against a fake exec
    backend that simulates the remote host. No sshd, no hosts, no gateway.
 2. Hard integration: when SSH_HOST (a reachable host with sshd running and
-   the whitelisted resource available) is set, real ssh_execute_background
-   and ssh_ensure_file calls run end-to-end.
+   the whitelisted resource available) is set, the helpers run end-to-end
+   against the REAL exec bridge: the stub registry is given a working
+   mcp_call (lazily built from the same extension modules the kernel uses),
+   so the live tests exercise the exact production code path.
 3. Red/green archaeology: run against an OLD build (git checkout afae558)
    to watch the reproductions fail (exit-127 started=True), and against the
    patched build to watch them pass.
@@ -60,11 +62,42 @@ LIVE_HOST = os.environ.get("SSH_HOST", "").strip()
 
 
 def _register(mcp_call=None):
+    """Build a stub registry with the ssh helpers registered.
+
+    With no explicit mcp_call, live mode (SSH_HOST set) wires the REAL
+    exec-bridge mcp_call — the same callable the ipybox kernel resolves at
+    runtime — so the SSH_HOST-gated tests exercise the production path
+    instead of dying with "mcp_call not registered" in the stub. CI mode
+    (SSH_HOST unset) is unchanged: unit tests pass a fake backend.
+    """
     reg = _Registry()
     sshmod.register(reg)
     if mcp_call is not None:
         reg.tools["mcp_call"] = mcp_call
+    elif LIVE_HOST:
+        reg.tools["mcp_call"] = _real_mcp_call()
     return reg
+
+
+def _real_mcp_call():
+    """Lazily assemble a real ``mcp_call`` from the kernel extension modules.
+
+    Mirrors ``ipybox.kernel.extensions.load_extensions_from_config``: the
+    ``core.mcp_call`` and ``core.exec_run`` extensions are registered into
+    a fresh registry, and the exec_run extension pulls its own mcp_call
+    dependency out of that same registry — exactly how the kernel wires
+    the two together. Requires only the sandbox source tree (no /etc
+    config, no running gateway): the callable targets the gateway exec
+    ``run`` action through the mcp2cli client configured by the env.
+    """
+    import ipybox.kernel.extensions as extmod
+    import ipybox.extensions.core.mcp_call as mcp_call_ext
+    import ipybox.extensions.core.exec_run as exec_run_ext
+
+    reg = extmod.ExtensionRegistry()
+    mcp_call_ext.register(reg)
+    exec_run_ext.register(reg)
+    return reg.get("mcp_call")
 
 
 def _ok_result(stdout="", exit_code=0):
@@ -239,6 +272,46 @@ def test_case3_env_prefix_uses_env_command():
 
 
 # --------------------------------------------------------------------------
+# Error surfacing (item 2): a nonzero scp/ssh step must produce a NON-NULL
+# error describing the cause (exit code + stderr tail), not error=None.
+# --------------------------------------------------------------------------
+
+
+def test_ensure_file_scp_failure_error_not_null():
+    """ETXTBSY-class failure: exec returns ok=False, exit_code=1 with the
+    remote scp stderr — ssh_ensure_file must surface it in `error`."""
+
+    def etxtbsy(upstream, action, args):
+        return {"ok": True, "structured_content": {
+            "ok": False, "exit_code": 1, "stdout": "",
+            "stderr": 'scp: dest open "/tmp/iperf3": Failure\n'
+                      "sent 0 bytes", "timed_out": False, "error": None}}
+
+    reg = _register(etxtbsy)
+    res = reg.tools["ssh_ensure_file"]("172.16.171.11", "iperf3")
+
+    assert res["ok"] is False
+    assert res["step"] == "scp"
+    assert res["error"], "error must be non-null"
+    assert "exit_code=1" in res["error"], res["error"]
+    assert "Failure" in res["error"], res["error"]
+
+
+def test_ensure_file_policy_denial_error_not_null():
+    """A policy denial (no structured payload, ok=False, text only) still
+    surfaces a non-null error."""
+
+    def denied(upstream, action, args):
+        return {"ok": False, "text": "exec/exec_run: ACCESS DENIED: scp"}
+
+    reg = _register(denied)
+    res = reg.tools["ssh_ensure_file"]("172.16.171.11", "iperf3")
+
+    assert res["ok"] is False
+    assert "ACCESS DENIED" in (res["error"] or "")
+
+
+# --------------------------------------------------------------------------
 # Optional hard integration (only when SSH_HOST is set)
 # --------------------------------------------------------------------------
 
@@ -276,8 +349,29 @@ def test_live_iperf3_server_stays_alive():
 @_need_live
 def test_live_ensure_file_scp_smoke():
     """Smoke: ssh_ensure_file uploads iperf3 to the host without an scp -l
-    regression (uploaded path returned, no usage error)."""
+    regression (uploaded path returned, no usage error).
+
+    ETXTBSY caveat: scp onto /tmp/iperf3 fails while that exact binary is
+    executing on the node (e.g. a server still running from the live test
+    above or an earlier run), so first wait out any running instance named
+    by the node's /tmp/iperf3.pid.
+    """
     reg = _register(None)
+    live = reg.tools.get("ssh_execute")
+
+    cat = live(LIVE_HOST, "cat", args=["/tmp/iperf3.pid"])
+    if cat.get("ok"):
+        old_pid = (cat.get("stdout") or "").strip()
+        if old_pid.isdigit():
+            import time
+
+            for _ in range(15):
+                ps = live(LIVE_HOST, "ps", args=["-p", old_pid])
+                if not (ps.get("ok")
+                        and old_pid in (ps.get("stdout") or "").split()):
+                    break
+                time.sleep(1)
+
     res = reg.tools["ssh_ensure_file"](LIVE_HOST, "iperf3")
     assert res["ok"] is True, res
     assert res["uploaded"] == "/tmp/iperf3", res

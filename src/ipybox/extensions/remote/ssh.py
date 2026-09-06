@@ -57,6 +57,40 @@ def _ssh_opts(machine):
     return opts
 
 
+def _exec_error(res):
+    """Build a human-readable error string from an exec-backend result dict.
+
+    The exec backend surfaces failures in three places, and they are not
+    interchangeable:
+
+    - ``error`` — crisp machine error (policy denial, missing whitelist
+      entry, transport failure). Prefer this verbatim.
+    - ``exit_code``/``stderr`` — a completed-but-nonzero subprocess: the
+      command RAN and failed, so the remote reason lives in stderr, not in
+      ``error`` (which is None). Without this clause scp/ssh failures
+      returned ``error: None`` and the cause was lost (e.g. scp ETXTBSY:
+      'scp: dest open "/tmp/iperf3": Failure' when the uploaded binary is
+      currently executing on the node — retry after it exits).
+    - ``timed_out`` — folded into the message so the caller can tell a
+      timeout (remote may still be running) from a hard failure.
+    """
+    parts = []
+    if res.get("error"):
+        parts.append(str(res["error"]).strip())
+    if res.get("timed_out"):
+        parts.append("timed out")
+    ec = res.get("exit_code")
+    if ec not in (None, 0):
+        parts.append("exit_code=%s" % ec)
+    err = res.get("stderr") or ""
+    if err:
+        tail = err.strip().splitlines()[-8:]
+        parts.append("stderr: " + " | ".join(tail))
+    if not parts:
+        return None
+    return "; ".join(parts)
+
+
 def register(registry):
     """Register SSH helpers."""
 
@@ -240,7 +274,8 @@ def register(registry):
                        timeout=SSH_UPLOAD_TIMEOUT)
         if not r1.get("ok"):
             return {"tool": "ssh_ensure_file", "machine": str(machine), "binary": b,
-                    "uploaded": None, "ok": False, "error": r1.get("error"),
+                    "uploaded": None, "ok": False,
+                    "error": _exec_error(r1) or r1.get("error"),
                     "step": "scp"}
 
         chmod_cmd = ["ssh", *ssh_opts, str(machine), f"chmod +x /tmp/{b}"]
@@ -249,7 +284,8 @@ def register(registry):
                        timeout=30)
         if not r2.get("ok"):
             return {"tool": "ssh_ensure_file", "machine": str(machine), "binary": b,
-                    "uploaded": None, "ok": False, "error": r2.get("error"),
+                    "uploaded": None, "ok": False,
+                    "error": _exec_error(r2) or r2.get("error"),
                     "step": "chmod"}
         return {"tool": "ssh_ensure_file", "machine": str(machine), "binary": b,
                 "uploaded": f"/tmp/{b}", "ok": True, "error": None, "step": None}
