@@ -258,13 +258,27 @@ _kernels_lock = threading.Lock()
 _UNRESOLVED_PREFIX = "${request_header:"
 
 
-def _resolve_session_id(session_id: Optional[str], kernel_env: Optional[Dict[str, str]]) -> str:
+def _resolve_session_id(
+    session_id: Optional[str],
+    kernel_env: Optional[Dict[str, str]],
+    ctx: Optional[FastMCPContext] = None,
+) -> str:
     if session_id:
         return str(session_id)
     if kernel_env:
         env_sid = kernel_env.get("MCP_SESSION_ID")
         if env_sid and not str(env_sid).startswith(_UNRESOLVED_PREFIX):
             return str(env_sid)
+    # Fallback: read Mcp-Session-Id from the incoming HTTP request header
+    if ctx is not None:
+        try:
+            rc = ctx.request_context
+            if rc is not None and rc.request is not None:
+                header_sid = rc.request.headers.get("Mcp-Session-Id")
+                if header_sid:
+                    return str(header_sid)
+        except Exception:
+            pass
     return str(uuid.uuid4())
 
 
@@ -330,7 +344,7 @@ async def execute_code(
     key = None
     ka_task: Optional[asyncio.Task] = None
     try:
-        key = _resolve_session_id(session_id, kernel_env)
+        key = _resolve_session_id(session_id, kernel_env, ctx=ctx)
         session = _get_or_create_session(key, kernel_env)
         session.last_used = time.monotonic()
         loop = asyncio.get_event_loop()

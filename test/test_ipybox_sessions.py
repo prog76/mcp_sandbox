@@ -384,3 +384,74 @@ class TestSessionWorkdir(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestResolveSessionIdFromHeader(unittest.TestCase):
+    """Tests for the ctx.request_context.request.headers fallback path."""
+
+    def test_falls_back_to_header_when_env_unresolved(self):
+        """When kernel_env has the literal placeholder, fall back to header."""
+        fake_ctx = MagicMock()
+        fake_ctx.request_context = MagicMock()
+        fake_ctx.request_context.request = MagicMock()
+        fake_ctx.request_context.request.headers = {"Mcp-Session-Id": "header-session-123"}
+
+        result = server._resolve_session_id(
+            None,
+            {"MCP_SESSION_ID": "${request_header:Mcp-Session-Id}"},
+            ctx=fake_ctx,
+        )
+        self.assertEqual(result, "header-session-123")
+
+    def test_falls_back_to_header_when_env_missing(self):
+        """When kernel_env is None, fall back to header."""
+        fake_ctx = MagicMock()
+        fake_ctx.request_context = MagicMock()
+        fake_ctx.request_context.request = MagicMock()
+        fake_ctx.request_context.request.headers = {"Mcp-Session-Id": "header-only"}
+
+        result = server._resolve_session_id(None, None, ctx=fake_ctx)
+        self.assertEqual(result, "header-only")
+
+    def test_env_resolved_takes_priority_over_header(self):
+        """A resolved env value wins over the header."""
+        fake_ctx = MagicMock()
+        fake_ctx.request_context = MagicMock()
+        fake_ctx.request_context.request = MagicMock()
+        fake_ctx.request_context.request.headers = {"Mcp-Session-Id": "header-val"}
+
+        result = server._resolve_session_id(
+            None,
+            {"MCP_SESSION_ID": "env-val"},
+            ctx=fake_ctx,
+        )
+        self.assertEqual(result, "env-val")
+
+    def test_header_missing_generates_fresh_uuid(self):
+        """No header, no env → fresh uuid."""
+        fake_ctx = MagicMock()
+        fake_ctx.request_context = MagicMock()
+        fake_ctx.request_context.request = MagicMock()
+        fake_ctx.request_context.request.headers = {}
+
+        result = server._resolve_session_id(None, None, ctx=fake_ctx)
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_ctx_access_failure_falls_through(self):
+        """If ctx.request_context access raises, fall through to uuid."""
+        fake_ctx = MagicMock()
+        type(fake_ctx).request_context = MagicMock(side_effect=AttributeError("no ctx"))
+
+        result = server._resolve_session_id(None, None, ctx=fake_ctx)
+        self.assertIsInstance(result, str)
+        self.assertTrue(len(result) > 0)
+
+    def test_explicit_session_id_wins_over_header(self):
+        """Explicit session_id arg wins over both env and header."""
+        fake_ctx = MagicMock()
+        fake_ctx.request_context = MagicMock()
+        fake_ctx.request_context.request = MagicMock()
+        fake_ctx.request_context.request.headers = {"Mcp-Session-Id": "header-val"}
+
+        result = server._resolve_session_id("explicit-id", None, ctx=fake_ctx)
+        self.assertEqual(result, "explicit-id")
