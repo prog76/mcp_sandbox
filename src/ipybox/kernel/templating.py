@@ -11,14 +11,21 @@ behave identically: any registered kernel helper (``list_skills()``,
 import asyncio
 import contextvars
 import logging
+import os
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from ipybox.kernel.extensions import get_registry
 
 log = logging.getLogger("ipybox.templating")
 
 _TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]*)\)\s*\}\}")
+
+
+# Max time a synchronous render (driven from a non-loop thread, e.g. get_skill)
+# may block waiting on a worker that runs async helpers on the event loop. A hung
+# upstream must never freeze the caller. See mcp_call._sync for the same guard.
+_BRIDGE_TIMEOUT_SECONDS = float(os.environ.get("MCP_BRIDGE_TIMEOUT_SECONDS", "30"))
 
 
 def _parse_template_args(args_str: str) -> list:
@@ -82,14 +89,29 @@ def _run_to_completion(coro):
     If an event loop is already running (e.g. inside the async prompt path)
     the coroutine is executed in a worker thread; otherwise :func:`asyncio.run`
     drives it directly.
+
+    The worker wait is bounded by ``_BRIDGE_TIMEOUT_SECONDS`` and the pool is
+    shut down without waiting, so a coroutine that never returns can never freeze
+    the event loop (the root cause of the ipybox-wide hang) nor block executor
+    teardown.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
     ctx = contextvars.copy_context()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(ctx.run, lambda: asyncio.run(coro)).result()
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(ctx.run, lambda: asyncio.run(coro))
+        return future.result(timeout=_BRIDGE_TIMEOUT_SECONDS)
+    except FutureTimeoutError as e:
+        raise TimeoutError(
+            f"Bridge call did not complete within {_BRIDGE_TIMEOUT_SECONDS:.0f}s "
+            f"on the event-loop thread; aborting to keep the server responsive"
+        ) from e
+    finally:
+        # Never block the loop thread waiting for a possibly-stuck worker.
+        pool.shutdown(wait=False)
 
 
 def render_template(text: str) -> str:

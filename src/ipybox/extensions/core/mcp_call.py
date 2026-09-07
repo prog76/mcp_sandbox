@@ -11,9 +11,17 @@ underlying async helpers can be replaced for testing.
 
 import asyncio
 import contextvars
-from concurrent.futures import ThreadPoolExecutor
+import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from ipybox import mcp_client
+
+# Max time a synchronous bridge call may block the event-loop thread when a loop
+# is already running (the async prompt path). A hung upstream must never be
+# allowed to freeze the whole FastMCP loop — this is the second line of defence
+# behind the per-call wait_for in mcp2cli's _fetch_tool_list_live. If a bridge
+# call exceeds this, we raise instead of wedging the server.
+_BRIDGE_TIMEOUT_SECONDS = float(os.environ.get("MCP_BRIDGE_TIMEOUT_SECONDS", "30"))
 
 
 def _sync(coro):
@@ -22,14 +30,29 @@ def _sync(coro):
     If a loop is already running (e.g. when called from inside an async template
     handler) the coroutine is executed in a worker thread; otherwise it is
     simply driven by :func:`asyncio.run`.
+
+    The worker wait is bounded by ``_BRIDGE_TIMEOUT_SECONDS`` and the pool is
+    shut down without waiting, so a coroutine that never returns can never freeze
+    the event loop (the root cause of the ipybox-wide hang) nor block executor
+    teardown.
     """
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
     ctx = contextvars.copy_context()
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(ctx.run, lambda: asyncio.run(coro)).result()
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(ctx.run, lambda: asyncio.run(coro))
+        return future.result(timeout=_BRIDGE_TIMEOUT_SECONDS)
+    except FutureTimeoutError as e:
+        raise TimeoutError(
+            f"Bridge call did not complete within {_BRIDGE_TIMEOUT_SECONDS:.0f}s "
+            f"on the event-loop thread; aborting to keep the server responsive"
+        ) from e
+    finally:
+        # Never block the loop thread waiting for a possibly-stuck worker.
+        pool.shutdown(wait=False)
 
 
 def register(registry):

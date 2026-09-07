@@ -349,6 +349,7 @@ async def execute_code(
         session.last_used = time.monotonic()
         loop = asyncio.get_event_loop()
         started = time.monotonic()
+        log.info("execute_code start (session_id=%s)", key)
 
         # Keep-alive: emit progress notifications while the code runs so MCP
         # clients (e.g. browser extensions with progress-reset timeouts) don't
@@ -367,6 +368,7 @@ async def execute_code(
                     pass
 
         session.last_used = time.monotonic()
+        log.info("execute_code done (session_id=%s, %.2fs)", key, time.monotonic() - started)
         return f"session_id: {key}\n{output}"
     except Exception as e:
         log.error("execute_code error (session_id=%s): %s", (key or session_id), e, exc_info=True)
@@ -424,6 +426,15 @@ async def mcp_call(
 
 
 def main():
+    # The app loggers (ipybox-mcp-server, ipybox.templating, ...) have no
+    # handlers of their own and propagate to root; ensure the root logger is wired
+    # up so INFO-level diagnostics (e.g. execute_code start/done) actually reach
+    # stdout. Mirrors gateway/gateway/start.py. Must run before mcp.run().
+    logging.basicConfig(
+        level=os.environ.get("IPYBOX_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9006)
     parser.add_argument("--host", default="0.0.0.0")
