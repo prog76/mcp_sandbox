@@ -125,7 +125,7 @@ class TestEndpointResolution(unittest.TestCase):
     def test_header_endpoint_passed_through(self):
         """The X-MCP-Endpoint header value is forwarded as the endpoint arg."""
         captured = {}
-        async def fake_call(upstream, action, arguments, stdin, timeout, endpoint):
+        async def fake_call(upstream, action, arguments, stdin, timeout, endpoint, **kw):
             captured["endpoint"] = endpoint
             return {
                 "ok": True, "is_error": False,
@@ -150,7 +150,7 @@ class TestEndpointResolution(unittest.TestCase):
     def test_explicit_endpoint_overrides_header(self):
         """An explicit endpoint arg wins over the header."""
         captured = {}
-        async def fake_call(upstream, action, arguments, stdin, timeout, endpoint):
+        async def fake_call(upstream, action, arguments, stdin, timeout, endpoint, **kw):
             captured["endpoint"] = endpoint
             return {
                 "ok": True, "is_error": False,
@@ -176,7 +176,7 @@ class TestEndpointResolution(unittest.TestCase):
     def test_no_ctx_no_header_falls_through(self):
         """With ctx=None, endpoint is passed as None (mcp_call_async resolves via env)."""
         captured = {}
-        async def fake_call(upstream, action, arguments, stdin, timeout, endpoint):
+        async def fake_call(upstream, action, arguments, stdin, timeout, endpoint, **kw):
             captured["endpoint"] = endpoint
             return {
                 "ok": True, "is_error": False,

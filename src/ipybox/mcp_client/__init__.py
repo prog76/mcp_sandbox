@@ -23,6 +23,8 @@ import contextvars
 import os
 from typing import Any, Callable, Dict, List, Optional, Awaitable
 
+from ipybox import mcp_result
+
 from mcp2cli.client import (
     DEFAULT_ENDPOINT,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
@@ -262,7 +264,7 @@ def _content_block_to_dict(block):
     return {"type": getattr(block, "type", "unknown"), "raw": str(block)}
 
 
-def _build_call_result(out_obj, upstream, action):
+def _build_call_result(out_obj, upstream, action, session_id="unknown", seq=0):
     """Convert an MCP SDK CallToolResult into a stable machine-readable dict.
 
     Schema (all keys always present):
@@ -292,15 +294,17 @@ def _build_call_result(out_obj, upstream, action):
     if isinstance(structured, dict) and len(structured) == 1 and structured.get("result") == text:
         structured = None
 
-    return {
-        "ok": not is_error,
-        "is_error": is_error,
-        "upstream": upstream,
-        "action": action,
-        "text": text,
-        "content": blocks,
-        "structured_content": structured,
-    }
+    return mcp_result.build_result(
+        ok=not is_error,
+        is_error=is_error,
+        upstream=upstream,
+        action=action,
+        text=text,
+        content=blocks,
+        structured=structured,
+        session_id=session_id,
+        seq=seq,
+    )
 
 
 def _error_result(upstream, action, message):
@@ -324,6 +328,8 @@ async def mcp_call_async(
     timeout: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
     endpoint: Optional[str] = None,
     progress_callback: Optional[Callable[[float, Optional[float], Optional[str]], Awaitable[None]]] = None,
+    session_id: str = "unknown",
+    seq: int = 0,
 ) -> Dict[str, Any]:
     """Call any MCP action with structured JSON arguments.
 
@@ -384,7 +390,7 @@ async def mcp_call_async(
                             progress_callback=progress_callback),
             timeout=timeout or DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
-        return _build_call_result(out_obj, upstream, resolved_tool_id)
+        return _build_call_result(out_obj, upstream, resolved_tool_id, session_id=session_id, seq=seq)
     except Exception as e:
         return _error_result(
             upstream,

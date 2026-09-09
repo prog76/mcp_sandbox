@@ -28,10 +28,20 @@ from ipybox.mcp_client import (
     mcp_call_async,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
 )
+from ipybox.mcp_result import McpCallResult, cleanup_ttl_sessions
+from ipybox.mcp_result import McpCallResult, cleanup_ttl_sessions
 
 log = logging.getLogger("ipybox-mcp-server")
 
 mcp = FastMCP("ipybox")
+_mcp_call_seq = 0
+_mcp_call_seq_lock = threading.Lock()
+
+def _next_seq():
+    global _mcp_call_seq
+    with _mcp_call_seq_lock:
+        _mcp_call_seq += 1
+        return _mcp_call_seq
 
 _PROMPTS_DIR = os.environ.get("IPYBOX_PROMPTS_DIR", "/var/mcp/skills/prompts")
 
@@ -462,6 +472,9 @@ async def mcp_call(
         except Exception:
             pass
 
+    sid = _resolve_session_id(None, None, ctx=ctx)
+    seq = _next_seq()
+
     result = await mcp_call_async(
         upstream=upstream,
         action=action,
@@ -469,6 +482,8 @@ async def mcp_call(
         stdin=stdin,
         timeout=timeout,
         endpoint=resolved_endpoint,
+        session_id=sid,
+        seq=seq,
     )
 
     if isinstance(result, str):
@@ -490,6 +505,10 @@ async def mcp_call(
         lines.append("")
         lines.append("--- structured ---")
         lines.append(json.dumps(structured))
+    file_path = result.get("file", "")
+    if file_path:
+        lines.append("")
+        lines.append(f"file: {file_path}")
     return "\n".join(lines).strip()
 
 
@@ -512,6 +531,13 @@ def main():
 
     cleanup_thread = threading.Thread(target=_cleanup_loop, daemon=True)
     cleanup_thread.start()
+
+    try:
+        n = cleanup_ttl_sessions()
+        if n:
+            log.info("TTL sweep removed %d expired spill session dirs", n)
+    except Exception as e:
+        log.warning("initial TTL sweep failed: %s", e)
 
     mcp.run(transport="streamable-http", host=args.host, port=args.port)
 
