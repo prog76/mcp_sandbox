@@ -8,6 +8,7 @@ the ipybox kernel MCP server (no real kernel is started).
 
 import sys
 import os
+import signal
 import time
 import threading
 import unittest
@@ -380,6 +381,108 @@ class TestSessionWorkdir(unittest.TestCase):
         b = server._get_or_create_session("b", None)
         self.assertNotEqual(a.workdir, b.workdir)
         self.assertEqual(mock_start.call_count, 2)
+
+
+class TestReaperTeardownSafety(unittest.TestCase):
+    """Regression tests for the 2026-09-08 total-outage freeze.
+
+    The reaper used to hold ``_kernels_lock`` across the blocking
+    ``km.shutdown_kernel(now=True)`` zmq teardown. When a kernel process was
+    wedged, that teardown hung forever; every subsequent ``execute_code`` then
+    blocked the asyncio event loop on the same lock and the whole MCP server
+    went silent (no responses, no logs).
+    """
+
+    def setUp(self):
+        self._orig_kernels = server._kernels
+        self._orig_timeout = server.IPYBOX_IDLE_TIMEOUT
+        self._orig_shutdown_timeout = server._KERNEL_SHUTDOWN_TIMEOUT
+        server._kernels = {}
+        server.IPYBOX_IDLE_TIMEOUT = 600
+
+    def tearDown(self):
+        server._kernels = self._orig_kernels
+        server.IPYBOX_IDLE_TIMEOUT = self._orig_timeout
+        server._KERNEL_SHUTDOWN_TIMEOUT = self._orig_shutdown_timeout
+
+    def test_wedged_teardown_does_not_block_new_sessions(self):
+        """While a reap is stuck in shutdown_kernel, _get_or_create_session
+        (which needs _kernels_lock) must still complete quickly."""
+        now = time.monotonic()
+        session = server.KernelSession(
+            km=MagicMock(), kc=MagicMock(), last_used=now - server.IPYBOX_IDLE_TIMEOUT - 1
+        )
+        stuck_done = threading.Event()
+
+        def _wedged_shutdown(*args, **kwargs):
+            stuck_done.wait(10.0)
+
+        session.km.shutdown_kernel.side_effect = _wedged_shutdown
+        server._kernels["stuck"] = session
+        server._KERNEL_SHUTDOWN_TIMEOUT = 0.2
+
+        reaper = threading.Thread(
+            target=server._reap_idle_sessions, kwargs={"now": now}, daemon=True
+        )
+        reaper.start()
+
+        # The victim must be unregistered quickly (lock released before any
+        # kernel teardown work happens) ...
+        deadline = time.monotonic() + 5.0
+        while "stuck" in server._kernels and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertNotIn("stuck", server._kernels)
+
+        # ... and creating a NEW session must not block on the reaper's
+        # wedged teardown.
+        with patch("ipybox.kernel.mcp_server._start_kernel") as mock_start:
+            mock_start.return_value = (MagicMock(), MagicMock())
+            t0 = time.monotonic()
+            server._get_or_create_session("fresh", None)
+            elapsed = time.monotonic() - t0
+        self.assertIn("fresh", server._kernels)
+        self.assertLess(elapsed, 5.0)
+
+        stuck_done.set()
+        reaper.join(10.0)
+        self.assertFalse(reaper.is_alive())
+
+    def test_shutdown_kernel_bounded_returns_despite_hang(self):
+        """_shutdown_kernel_bounded never waits longer than the timeout."""
+        stuck_done = threading.Event()
+
+        def _hang(*args, **kwargs):
+            stuck_done.wait(10.0)
+
+        km = MagicMock()
+        km.provisioner = None  # no pid available → no kill attempted
+        km.shutdown_kernel.side_effect = _hang
+        t0 = time.monotonic()
+        server._shutdown_kernel_bounded(km, timeout=0.2)
+        elapsed = time.monotonic() - t0
+        stuck_done.set()  # let the daemon helper thread finish
+        self.assertLess(elapsed, 5.0)
+
+    def test_shutdown_kernel_bounded_kills_stuck_kernel(self):
+        """When the graceful shutdown hangs, the kernel process is SIGKILLed."""
+        stuck_done = threading.Event()
+
+        def _hang(*args, **kwargs):
+            stuck_done.wait(10.0)
+
+        km = MagicMock()
+        km.provisioner.process_pid = 424242
+        km.shutdown_kernel.side_effect = _hang
+        kills = []
+        t0 = time.monotonic()
+        with patch.object(
+            server.os, "kill", side_effect=lambda pid, sig: kills.append((pid, sig))
+        ):
+            server._shutdown_kernel_bounded(km, timeout=0.2)
+        elapsed = time.monotonic() - t0
+        stuck_done.set()
+        self.assertIn((424242, signal.SIGKILL), kills)
+        self.assertLess(elapsed, 5.0)
 
 
 if __name__ == "__main__":

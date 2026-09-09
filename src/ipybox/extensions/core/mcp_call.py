@@ -77,7 +77,7 @@ def register(registry):
 
         Returns a dict with keys ``ok``, ``is_error``, ``upstream``, ``action``,
         ``text``, ``content`` and ``structured_content``. On tool-resolution
-        failure a string error is returned instead.
+        failure ``ok`` is False, ``is_error`` is True, and ``text`` carries the error message.
         """
         return _sync(
             mcp_client.mcp_call_async(

@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import threading
 import time
 import uuid
@@ -298,9 +299,70 @@ def _get_or_create_session(session_id: str, kernel_env: Optional[Dict[str, str]]
         return session
 
 
+# Hard ceiling for tearing down one kernel during reap. jupyter_client's
+# shutdown_kernel (even with now=True) does a synchronous zmq teardown that
+# can hang forever when the kernel process is wedged; the reaper must never
+# wait longer than this on a single victim.
+_KERNEL_SHUTDOWN_TIMEOUT = float(os.environ.get("IPYBOX_KERNEL_SHUTDOWN_TIMEOUT", "10"))
+
+
+def _shutdown_kernel_bounded(km: Any, timeout: Optional[float] = None) -> None:
+    """Tear down a kernel without ever blocking the caller indefinitely.
+
+    ``KernelManager.shutdown_kernel`` (even with ``now=True``) synchronously
+    stops the zmq channels and terminates the zmq context; when a kernel
+    process is wedged this can hang forever. Run the shutdown in a daemon
+    thread with a join timeout; on expiry, SIGKILL the kernel process (when
+    its pid is known) and stop waiting — the helper thread is a daemon, so a
+    stubborn zmq teardown cannot block reaping or the asyncio event loop.
+    """
+    if timeout is None:
+        timeout = _KERNEL_SHUTDOWN_TIMEOUT
+    done = threading.Event()
+
+    def _shutdown() -> None:
+        try:
+            km.shutdown_kernel(now=True)
+        except Exception:
+            pass
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_shutdown, daemon=True, name="ipybox-kernel-shutdown")
+    t.start()
+    if not done.wait(timeout):
+        pid = None
+        provisioner = getattr(km, "provisioner", None)
+        if provisioner is not None:
+            pid = getattr(provisioner, "process_pid", None) or getattr(provisioner, "pid", None)
+        if pid is None:
+            pid = getattr(km, "kernel_pid", None)
+        if isinstance(pid, int) and pid > 0:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                log.warning(
+                    "Kernel shutdown stuck >%.0fs — SIGKILLed kernel pid %s", timeout, pid
+                )
+            except Exception as e:
+                log.warning(
+                    "Kernel shutdown stuck >%.0fs — could not SIGKILL pid %s: %s",
+                    timeout, pid, e,
+                )
+        else:
+            log.warning("Kernel shutdown stuck >%.0fs and no kernel pid available to kill", timeout)
+        # Short grace so the helper thread can observe the kill. Even if the
+        # zmq teardown stays wedged, the thread is a daemon and harmless.
+        done.wait(1.0)
+
+
 def _reap_idle_sessions(now: Optional[float] = None) -> list:
     now = now if now is not None else time.monotonic()
     reaped = []
+    # Phase 1: collect + unregister idle sessions while holding _kernels_lock
+    # (fast, dict-only operations). The lock MUST NOT be held across kernel
+    # teardown: a wedged zmq teardown would block _get_or_create_session —
+    # which runs on the asyncio event loop — and freeze the whole MCP server.
+    victims = []
     with _kernels_lock:
         for sid, session in list(_kernels.items()):
             idle_for = now - session.last_used
@@ -312,16 +374,19 @@ def _reap_idle_sessions(now: Optional[float] = None) -> list:
                 _kernels.pop(sid, None)
             finally:
                 session.lock.release()
-            try:
-                session.km.shutdown_kernel(now=True)
-            except Exception:
-                pass
-            if session.workdir:
-                # Best-effort cleanup of the per-session temp dir; never block
-                # reaping on a failed rmtree.
-                shutil.rmtree(session.workdir, ignore_errors=True)
-            reaped.append(sid)
-            log.info("Reaped idle ipykernel session %s (idle %.0fs)", sid[:8], idle_for)
+            victims.append((sid, session, idle_for))
+    # Phase 2: bounded teardown, outside any global lock.
+    for sid, session, idle_for in victims:
+        try:
+            _shutdown_kernel_bounded(session.km)
+        except Exception:
+            pass
+        if session.workdir:
+            # Best-effort cleanup of the per-session temp dir; never block
+            # reaping on a failed rmtree.
+            shutil.rmtree(session.workdir, ignore_errors=True)
+        reaped.append(sid)
+        log.info("Reaped idle ipykernel session %s (idle %.0fs)", sid[:8], idle_for)
     return reaped
 
 
@@ -345,7 +410,10 @@ async def execute_code(
     ka_task: Optional[asyncio.Task] = None
     try:
         key = _resolve_session_id(session_id, kernel_env, ctx=ctx)
-        session = _get_or_create_session(key, kernel_env)
+        # Run the session lookup/creation off the event loop: it takes the
+        # global _kernels_lock and may start a kernel (seconds of blocking
+        # I/O) — doing that inline would stall every other request.
+        session = await asyncio.to_thread(_get_or_create_session, key, kernel_env)
         session.last_used = time.monotonic()
         loop = asyncio.get_event_loop()
         started = time.monotonic()

@@ -142,11 +142,11 @@ class TestAddressingModes(unittest.TestCase):
 
     def test_mcp_call_combined_bare_name_errors(self):
         r, _ = self._call(action="terminal_exec")
-        self.assertIsInstance(r, str); self.assertIn("not found", r)
+        self.assertIsInstance(r, dict); self.assertFalse(r["ok"]); self.assertIn("not found", r["text"])
 
     def test_mcp_call_foreign_full_id_errors(self):
         r, _ = self._call(upstream="k8s", action="vscode_terminal_exec")
-        self.assertIsInstance(r, str); self.assertIn("does not belong", r)
+        self.assertIsInstance(r, dict); self.assertFalse(r["ok"]); self.assertIn("does not belong", r["text"])
 
     # -- mcp_describe (both forms) ---------------------------------------
 

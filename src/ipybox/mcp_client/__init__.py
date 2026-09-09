@@ -368,9 +368,9 @@ async def mcp_call_async(
     try:
         resolved_tool_id = _resolve_action_id(upstream, action, tool_names)
     except ValueError as e:
-        return f"Error: {e}"
+        return _error_result(upstream or '', action or '', f"Error: {e}")
     if resolved_tool_id is None:
-        return "Error: Action not provided (pass action=..., optionally with upstream=...)."
+        return _error_result(upstream or '', action or '', "Error: Action not provided (pass action=..., optionally with upstream=...).")
     if upstream is None:
         upstream = resolved_tool_id.split("_", 1)[0]
 
