@@ -175,6 +175,59 @@ class TestReapIdleSessions(unittest.TestCase):
         self.assertIn(sid, reaped)
 
 
+class TestShutdownKernelBounded(unittest.TestCase):
+    """Regression tests for the zmq-context GC freeze (2026-09-09).
+
+    jupyter_client's shutdown_kernel never stops the channels of the
+    ``km.client()`` handle, so its private zmq Context outlived reaped
+    sessions with open sockets. When that Context was later GC'd on the
+    asyncio event loop thread, ``Context.__del__ → destroy() → term()``
+    blocked forever and froze the whole server. The teardown must call
+    ``kc.stop_channels()`` (which closes all channel sockets and destroys
+    the per-client context) BEFORE ``km.shutdown_kernel``.
+    """
+
+    def test_stops_client_channels_before_kernel_shutdown(self):
+        """kc.stop_channels runs first — sockets closed before teardown."""
+        km, kc = MagicMock(), MagicMock()
+        order = []
+        km.shutdown_kernel.side_effect = lambda **kw: order.append("shutdown")
+        kc.stop_channels.side_effect = lambda: order.append("stop_channels")
+
+        server._shutdown_kernel_bounded(km, kc)
+
+        self.assertEqual(order, ["stop_channels", "shutdown"])
+        km.shutdown_kernel.assert_called_once_with(now=True)
+
+    def test_stop_channels_failure_still_shuts_kernel_down(self):
+        """A broken client must not prevent the kernel teardown."""
+        km, kc = MagicMock(), MagicMock()
+        kc.stop_channels.side_effect = RuntimeError("boom")
+
+        server._shutdown_kernel_bounded(km, kc)
+
+        km.shutdown_kernel.assert_called_once_with(now=True)
+
+    def test_no_client_still_shuts_kernel_down(self):
+        """kc=None (legacy call sites) still tears the kernel down."""
+        km = MagicMock()
+        server._shutdown_kernel_bounded(km, None)
+        km.shutdown_kernel.assert_called_once_with(now=True)
+
+    def test_reap_stops_client_channels(self):
+        """Reaping a session must also stop its client channels."""
+        now = time.monotonic()
+        sid = "landmine-session"
+        session = server.KernelSession(
+            km=MagicMock(), kc=MagicMock(), last_used=now - server.IPYBOX_IDLE_TIMEOUT - 1
+        )
+        server._kernels[sid] = session
+        reaped = server._reap_idle_sessions(now=now)
+        self.assertIn(sid, reaped)
+        session.kc.stop_channels.assert_called_once()
+        session.km.shutdown_kernel.assert_called_once_with(now=True)
+
+
 class TestSessionManager(unittest.TestCase):
     """Tests for _get_or_create_session."""
 

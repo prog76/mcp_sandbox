@@ -316,7 +316,7 @@ def _get_or_create_session(session_id: str, kernel_env: Optional[Dict[str, str]]
 _KERNEL_SHUTDOWN_TIMEOUT = float(os.environ.get("IPYBOX_KERNEL_SHUTDOWN_TIMEOUT", "10"))
 
 
-def _shutdown_kernel_bounded(km: Any, timeout: Optional[float] = None) -> None:
+def _shutdown_kernel_bounded(km: Any, kc: Any = None, timeout: Optional[float] = None) -> None:
     """Tear down a kernel without ever blocking the caller indefinitely.
 
     ``KernelManager.shutdown_kernel`` (even with ``now=True``) synchronously
@@ -325,6 +325,17 @@ def _shutdown_kernel_bounded(km: Any, timeout: Optional[float] = None) -> None:
     thread with a join timeout; on expiry, SIGKILL the kernel process (when
     its pid is known) and stop waiting — the helper thread is a daemon, so a
     stubborn zmq teardown cannot block reaping or the asyncio event loop.
+
+    ``kc`` (the ``km.client()`` handle used for execution) MUST be torn down
+    here too: jupyter_client's ``shutdown_kernel`` does not stop the client's
+    channel sockets, so its private zmq Context would outlive the session
+    with open sockets. When that Context is later garbage-collected — often
+    on the asyncio event loop thread — ``Context.__del__ → destroy() →
+    term()`` blocks forever waiting for the still-open sockets and freezes
+    the whole MCP server (diagnosed 2026-09-09 via py-spy: main thread stuck
+    in ``zmq/sugar/context.py:264 term`` inside a pydantic GC finalizer).
+    ``kc.stop_channels()`` closes every channel socket and destroys the
+    per-client context, defusing that landmine deterministically.
     """
     if timeout is None:
         timeout = _KERNEL_SHUTDOWN_TIMEOUT
@@ -332,6 +343,14 @@ def _shutdown_kernel_bounded(km: Any, timeout: Optional[float] = None) -> None:
 
     def _shutdown() -> None:
         try:
+            # Stop the client channels (and destroy its private zmq context)
+            # BEFORE shutting the kernel down, so no socket of this session
+            # can outlive the teardown.
+            if kc is not None:
+                try:
+                    kc.stop_channels()
+                except Exception:
+                    pass
             km.shutdown_kernel(now=True)
         except Exception:
             pass
@@ -388,7 +407,7 @@ def _reap_idle_sessions(now: Optional[float] = None) -> list:
     # Phase 2: bounded teardown, outside any global lock.
     for sid, session, idle_for in victims:
         try:
-            _shutdown_kernel_bounded(session.km)
+            _shutdown_kernel_bounded(session.km, session.kc)
         except Exception:
             pass
         if session.workdir:
