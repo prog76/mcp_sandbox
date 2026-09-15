@@ -25,7 +25,14 @@ _TEMPLATE_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(\s*([^)]*)\)\s*\
 # Max time a synchronous render (driven from a non-loop thread, e.g. get_skill)
 # may block waiting on a worker that runs async helpers on the event loop. A hung
 # upstream must never freeze the caller. See mcp_call._sync for the same guard.
-_BRIDGE_TIMEOUT_SECONDS = float(os.environ.get("MCP_BRIDGE_TIMEOUT_SECONDS", "30"))
+# t_ac4c70db: ceiling is env-configurable (default 30s kept). Set e.g.
+# IPYBOX_BRIDGE_CALL_TIMEOUT_SECONDS=300 in the ipybox service env for long
+# upstream operations; still bounded so a hung upstream cannot wedge the loop.
+_BRIDGE_TIMEOUT_SECONDS = float(
+    os.environ.get("IPYBOX_BRIDGE_CALL_TIMEOUT_SECONDS")
+    or os.environ.get("MCP_BRIDGE_TIMEOUT_SECONDS")
+    or "30"
+)
 
 
 def _parse_template_args(args_str: str) -> list:
@@ -107,7 +114,10 @@ def _run_to_completion(coro):
     except FutureTimeoutError as e:
         raise TimeoutError(
             f"Bridge call did not complete within {_BRIDGE_TIMEOUT_SECONDS:.0f}s "
-            f"on the event-loop thread; aborting to keep the server responsive"
+            f"on the event-loop thread; aborting to keep the server responsive. "
+            f"For operations longer than this ceiling use a background kernel job "
+            f"(job_submit() + job_wait()), or raise the ceiling via "
+            f"IPYBOX_BRIDGE_CALL_TIMEOUT_SECONDS in the ipybox service env."
         ) from e
     finally:
         # Never block the loop thread waiting for a possibly-stuck worker.

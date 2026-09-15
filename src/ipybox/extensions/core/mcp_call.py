@@ -21,7 +21,14 @@ from ipybox import mcp_client
 # allowed to freeze the whole FastMCP loop — this is the second line of defence
 # behind the per-call wait_for in mcp2cli's _fetch_tool_list_live. If a bridge
 # call exceeds this, we raise instead of wedging the server.
-_BRIDGE_TIMEOUT_SECONDS = float(os.environ.get("MCP_BRIDGE_TIMEOUT_SECONDS", "30"))
+# t_ac4c70db: ceiling is env-configurable (default 30s kept). Set e.g.
+# IPYBOX_BRIDGE_CALL_TIMEOUT_SECONDS=300 in the ipybox service env for long
+# upstream operations; still bounded so a hung upstream cannot wedge the loop.
+_BRIDGE_TIMEOUT_SECONDS = float(
+    os.environ.get("IPYBOX_BRIDGE_CALL_TIMEOUT_SECONDS")
+    or os.environ.get("MCP_BRIDGE_TIMEOUT_SECONDS")
+    or "30"
+)
 
 
 def _sync(coro):
@@ -48,7 +55,10 @@ def _sync(coro):
     except FutureTimeoutError as e:
         raise TimeoutError(
             f"Bridge call did not complete within {_BRIDGE_TIMEOUT_SECONDS:.0f}s "
-            f"on the event-loop thread; aborting to keep the server responsive"
+            f"on the event-loop thread; aborting to keep the server responsive. "
+            f"For operations longer than this ceiling use a background kernel job "
+            f"(job_submit() + job_wait()), or raise the ceiling via "
+            f"IPYBOX_BRIDGE_CALL_TIMEOUT_SECONDS in the ipybox service env."
         ) from e
     finally:
         # Never block the loop thread waiting for a possibly-stuck worker.
