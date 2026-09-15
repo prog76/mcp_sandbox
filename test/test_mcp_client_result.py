@@ -56,6 +56,62 @@ class TestResultSchema(unittest.TestCase):
         r = mcp_client._error_result("e","a","boom")
         self.assertFalse(r["ok"]); self.assertEqual(r["text"], "boom"); self.assertEqual(r["content"], [])
 
+    # ------------------------------------------------------------------
+    # Raw-HTTP transport shape (mcp2cli >= the session-reuse rewrite)
+    # ------------------------------------------------------------------
+    # mcp2cli's ``_call_tool_live`` speaks raw HTTP to keep the Mcp-Session-Id
+    # header on every request, so it returns the whole JSON-RPC envelope with
+    # dict content blocks instead of an SDK CallToolResult object.  Regression:
+    # those payloads were silently dropped (ok:true, text:"", bytes_total:0).
+    def test_raw_envelope_dict_payload(self):
+        msg = "session_id: abc123\nPAYLOAD_MARKER"
+        envelope = {
+            "jsonrpc": "2.0", "id": 2,
+            "result": {
+                "_meta": {"fastmcp": {"wrap_result": True}},
+                "content": [{"type": "text", "text": msg}],
+                "structuredContent": {"result": msg},
+                "isError": False,
+            },
+        }
+        r = mcp_client._build_call_result(envelope, "ipybox", "ipybox_execute_code")
+        self.assertTrue(r["ok"]); self.assertFalse(r["is_error"])
+        self.assertEqual(r["text"], msg)
+        self.assertGreater(r["bytes_total"], 0)
+
+    def test_raw_envelope_error_flag(self):
+        envelope = {"jsonrpc": "2.0", "id": 2,
+                    "result": {"content": [{"type": "text", "text": "oops"}], "isError": True}}
+        r = mcp_client._build_call_result(envelope, "git", "git_push")
+        self.assertFalse(r["ok"]); self.assertTrue(r["is_error"])
+        self.assertEqual(r["text"], "oops")
+
+    def test_bare_payload_dict(self):
+        payload = {"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+                   "isError": False}
+        r = mcp_client._build_call_result(payload, "k8s", "k8s_pods_list")
+        self.assertEqual(r["text"], "a\nb")
+
+    def test_raw_envelope_structured_content_kept(self):
+        sc = {"nodes": [{"name": "n1"}]}
+        envelope = {"jsonrpc": "2.0", "id": 2,
+                    "result": {"content": [{"type": "text", "text": "t"}],
+                               "structuredContent": sc, "isError": False}}
+        r = mcp_client._build_call_result(envelope, "k8s", "k8s_nodes_top")
+        self.assertEqual(r["structured_content"], sc)
+
+    def test_sdk_object_still_supported(self):
+        # The pre-raw-HTTP shape must keep working (other transports/clients).
+        r = mcp_client._build_call_result(_result([_text("legacy")]), "e", "x")
+        self.assertTrue(r["ok"]); self.assertEqual(r["text"], "legacy")
+
+    def test_coerce_tool_result_unwraps_envelope(self):
+        inner = {"content": [{"type": "text", "text": "x"}], "isError": False}
+        self.assertIs(mcp_client._coerce_tool_result({"jsonrpc": "2.0", "result": inner}), inner)
+        self.assertIs(mcp_client._coerce_tool_result(inner), inner)
+        obj = _result([_text("y")])
+        self.assertIs(mcp_client._coerce_tool_result(obj), obj)
+
 class TestWrappers(unittest.TestCase):
     async def _fake(self, upstream, action, arguments=None, stdin=None, timeout=120, endpoint=None):
         return mcp_client._build_call_result(_result([_text("OUT-42")]), upstream, "exec_run")

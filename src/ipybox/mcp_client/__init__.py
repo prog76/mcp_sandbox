@@ -256,8 +256,55 @@ async def mcp_describe_async(action: str, upstream: Optional[str] = None, endpoi
     return format_tool_schema(tool)
 
 
+def _payload_field(out, name, default=None):
+    """Read ``name`` from an MCP SDK result object *or* a raw payload dict.
+
+    mcp2cli's raw-HTTP path hands back plain dicts (the JSON-RPC ``result``
+    object), while older releases returned SDK objects — both must work.
+    """
+    if isinstance(out, dict):
+        val = out.get(name, default)
+        if val is None and name == "isError":
+            return out.get("is_error", default)
+        return val
+    return getattr(out, name, default)
+
+
+def _coerce_tool_result(out_obj):
+    """Normalize a tool-call result into a ``CallToolResult``-shaped value.
+
+    mcp2cli's ``_call_tool_live`` talks raw HTTP (so the ``Mcp-Session-Id``
+    header is sent on every request) and therefore returns the whole JSON-RPC
+    *envelope*::
+
+        {"jsonrpc": "2.0", "id": 2, "result": {"content": [...], ...}}
+
+    Older mcp2cli releases used the MCP SDK client and returned a
+    ``CallToolResult`` object, which is the shape this module's
+    ``text``/``content``/``structured_content`` contract was written against.
+    Accept the envelope, a bare payload and SDK objects alike so a transport
+    change can never silently blank the payload again.
+    """
+    if isinstance(out_obj, dict):
+        inner = out_obj.get("result")
+        if isinstance(inner, dict):
+            # Envelope: unwrap the payload, but keep any envelope-level error.
+            if "error" in out_obj:
+                return {"content": [], "isError": True,
+                        "structuredContent": None, "error": out_obj["error"]}
+            return inner
+        # Already a bare payload dict.
+        return out_obj
+    return out_obj
+
+
 def _content_block_to_dict(block):
-    """Normalize an MCP ContentBlock into a JSON-able dict."""
+    """Normalize an MCP ContentBlock (SDK object or raw payload dict) to a dict."""
+    if isinstance(block, dict):
+        text = block.get("text")
+        if isinstance(text, str):
+            return {"type": "text", "text": text}
+        return {"type": block.get("type", "unknown"), "raw": str(block)}
     text = getattr(block, "text", None)
     if isinstance(text, str):
         return {"type": "text", "text": text}
@@ -265,7 +312,11 @@ def _content_block_to_dict(block):
 
 
 def _build_call_result(out_obj, upstream, action, session_id="unknown", seq=0):
-    """Convert an MCP SDK CallToolResult into a stable machine-readable dict.
+    """Convert a tool-call result into a stable machine-readable dict.
+
+    Accepts an MCP SDK ``CallToolResult`` object (older mcp2cli releases), the
+    raw JSON-RPC envelope returned by mcp2cli's raw-HTTP path, or a bare
+    payload dict — see ``_coerce_tool_result``.
 
     Schema (all keys always present):
       ok                 bool    True unless the call reported isError.
@@ -278,10 +329,11 @@ def _build_call_result(out_obj, upstream, action, session_id="unknown", seq=0):
       structured_content any     downstream structuredContent, if any
                                  (null for text-only tools).
     """
-    is_error = bool(getattr(out_obj, "isError", False))
-    blocks = [_content_block_to_dict(c) for c in (getattr(out_obj, "content", None) or [])]
+    payload = _coerce_tool_result(out_obj)
+    is_error = bool(_payload_field(payload, "isError", False))
+    blocks = [_content_block_to_dict(c) for c in (_payload_field(payload, "content", None) or [])]
     text = "\n".join(b["text"] for b in blocks if b.get("type") == "text")
-    structured = getattr(out_obj, "structuredContent", None)
+    structured = _payload_field(payload, "structuredContent", None)
 
     # De-duplicate the payload: fastmcp wraps plain-string tool results into
     # BOTH content=[TextContent(msg)] and structuredContent={"result": msg},
