@@ -64,7 +64,7 @@ async def _render_prompt(text: str) -> str:
     return await render_template_async(text)
 
 
-def _make_prompt(path: str, body: str):
+def _make_prompt(path: str, fallback_body: str = ""):
     async def _prompt(ctx: Optional[FastMCPContext] = None):
         endpoint = None
         if ctx is not None:
@@ -74,6 +74,17 @@ def _make_prompt(path: str, body: str):
                     endpoint = rc.request.headers.get("X-MCP-Endpoint")
             except Exception:
                 pass
+        # Live reload (t_439832ea): re-read the prompt file on every render so
+        # edits under /var/mcp/skills/prompts reach prompts/get without a
+        # container restart, matching the skills path (read at call time).
+        # Registration (prompts/list name+description) stays startup-only, so
+        # a *new* prompt file still requires a restart to appear.
+        body = fallback_body
+        try:
+            with open(path) as fh:
+                body = _parse_frontmatter(fh.read())[1]
+        except Exception as e:
+            log.warning("Prompt %s unreadable, serving startup body: %s", path, e)
         if endpoint:
             token = set_endpoint_override(endpoint)
             try:
@@ -86,8 +97,16 @@ def _make_prompt(path: str, body: str):
     return _prompt
 
 
-def _register_prompts():
+def _register_prompts(target=None):
+    """Register *.md files under _PROMPTS_DIR as MCP prompts.
+
+    Bodies are re-read on every render (see _make_prompt), so editing an
+    existing prompt file is live; the name/description listed by
+    prompts/list are still read once at startup. ``target`` lets tests
+    register into an isolated FastMCP instance instead of the global one.
+    """
     from fastmcp.prompts import FunctionPrompt
+    server = mcp if target is None else target
     if not os.path.isdir(_PROMPTS_DIR):
         log.warning("Prompts dir not found at %s", _PROMPTS_DIR)
         return
@@ -104,7 +123,7 @@ def _register_prompts():
             continue
         name = fm.get("name") or f[:-3]
         desc = fm.get("description") or ""
-        mcp.add_prompt(
+        server.add_prompt(
             FunctionPrompt.from_function(
                 _make_prompt(path, body),
                 name=name,

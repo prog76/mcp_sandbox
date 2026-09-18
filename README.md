@@ -57,3 +57,22 @@ docker run -p 9006:9006 mcp-sandbox
 2. Commit, `git tag vX.Y.Z && git push && git push --tags`.
 3. CI tests and pushes the image to GHCR.
 4. Bump `SANDBOX_VERSION` in the deploy repo's `.env`.
+
+## Prompts (live reload)
+
+MCP prompts come from `IPYBOX_PROMPTS_DIR` (default `/var/mcp/skills/prompts`,
+bind-mounted from the deploy repo's `config/skills/prompts/`).
+
+- **Editing an existing prompt file is live**: the body is re-read on every
+  `prompts/get`, exactly like skills read through `get_skill()`. No container
+  restart is needed.
+- **Adding or removing a prompt file needs a restart**: the name and
+  description listed by `prompts/list` are read once at server startup
+  (`_register_prompts()`).
+- A prompt file that becomes unreadable (deleted mid-flight, bad perms) falls
+  back to the body captured at startup and logs a warning instead of failing
+  the request.
+
+If a prompt edit does not seem to take effect, check the file the container
+actually sees (`docker compose exec ipybox cat /var/mcp/skills/prompts/<f>.md`)
+before restarting anything.
