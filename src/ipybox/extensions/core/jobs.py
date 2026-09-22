@@ -25,6 +25,8 @@ from collections import deque
 MAX_JOBS = int(os.environ.get("IPYBOX_MAX_JOBS", "8"))
 JOB_MAX_RUNTIME = float(os.environ.get("IPYBOX_JOB_MAX_RUNTIME", "3600"))
 LOG_TAIL_LINES = 20
+# Finished jobs kept for result collection after they stop occupying a slot.
+MAX_FINISHED_JOBS = int(os.environ.get("IPYBOX_MAX_FINISHED_JOBS", "32"))
 
 _jobs = {}
 
@@ -115,6 +117,20 @@ def _run_job(job, target, user_ns):
         job.done.set()
 
 
+def _prune_finished(keep: int = MAX_FINISHED_JOBS) -> None:
+    """Drop the oldest finished jobs, keeping the last `keep` of them.
+
+    Finished jobs are retained so their result stays collectable, but they are
+    not running work and must not consume the run cap. Called on every submit,
+    so the tracker cannot grow without bound either.
+    """
+    finished = [j for j in _jobs.values() if j.status != "running"]
+    if len(finished) <= keep:
+        return
+    finished.sort(key=lambda j: j.finished or 0.0)
+    for job in finished[: len(finished) - keep]:
+        _jobs.pop(job.id, None)
+
 def register(registry):
     """Register background-job helpers."""
 
@@ -131,10 +147,15 @@ def register(registry):
 
         Returns plain text starting with "job_id: <id>".
         """
-        if len(_jobs) >= MAX_JOBS:
-            active = sum(1 for j in _jobs.values() if j.status == "running")
-            return (f"Error: job limit reached ({len(_jobs)} tracked, "
-                    f"{active} running). Use job_kill or collect finished jobs.")
+        # The cap bounds RUNNING jobs, not lifetime submissions: a finished job
+        # is only kept so its result can still be collected, so it must not
+        # occupy a slot. Counting len(_jobs) counted every job ever tracked and
+        # wedged the tracker permanently at zero running.
+        _prune_finished()
+        running = sum(1 for j in _jobs.values() if j.status == "running")
+        if running >= MAX_JOBS:
+            return (f"Error: job limit reached ({running} running, "
+                    f"{len(_jobs)} tracked). Use job_kill or collect finished jobs.")
 
         try:
             ip = get_ipython()  # noqa: F821 — present inside kernels

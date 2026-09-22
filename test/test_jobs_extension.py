@@ -175,5 +175,37 @@ class TestNamespacePersistence(JobsTestBase):
         self.assertNotIn("__ipybox_job__", self.user_ns)
 
 
+class TestJobCapRegression(JobsTestBase):
+    """The cap must bound RUNNING jobs, not lifetime submissions."""
+
+    def test_finished_jobs_do_not_consume_slots(self):
+        n = jobs_ext.MAX_JOBS + 4
+        for i in range(n):
+            out = self.submit_with_ns(f"v{i} = {i}")
+            self.assertIn("job_id:", out, f"submit {i} rejected: {out}")
+            jid = out.splitlines()[0].split(": ")[1]
+            state = self.job_wait(jid, timeout=5)
+            self.assertIn("status: done", state)
+        self.assertEqual(self.user_ns.get(f"v{n - 1}"), n - 1)
+
+    def test_running_jobs_still_capped(self):
+        for i in range(jobs_ext.MAX_JOBS):
+            j = jobs_ext._Job(f"r{i}", "t")
+            j.status = "running"
+            jobs_ext._jobs[j.id] = j
+        out = self.submit_with_ns("x = 1")
+        self.assertIn("Error: job limit reached", out)
+
+    def test_prune_keeps_only_recent_finished(self):
+        for i in range(jobs_ext.MAX_FINISHED_JOBS + 5):
+            j = jobs_ext._Job(f"j{i}", "t")
+            j.status = "done"
+            j.finished = float(i)
+            jobs_ext._jobs[j.id] = j
+        jobs_ext._prune_finished()
+        self.assertEqual(len(jobs_ext._jobs), jobs_ext.MAX_FINISHED_JOBS)
+        # oldest pruned first, newest survives
+        self.assertIn(f"j{jobs_ext.MAX_FINISHED_JOBS + 4}", jobs_ext._jobs)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
