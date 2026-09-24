@@ -29,7 +29,6 @@ from ipybox.mcp_client import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
 )
 from ipybox.mcp_result import McpCallResult, cleanup_ttl_sessions
-from ipybox.mcp_result import McpCallResult, cleanup_ttl_sessions
 
 log = logging.getLogger("ipybox-mcp-server")
 
@@ -453,7 +452,7 @@ async def execute_code(
     session_id: Optional[str] = None,
     kernel_env: Optional[Dict[str, str]] = None,
     ctx: Optional[FastMCPContext] = None,
-) -> str:
+):
     key = None
     ka_task: Optional[asyncio.Task] = None
     try:
@@ -491,6 +490,38 @@ async def execute_code(
         return f"session_id: {key or 'unknown'}\nError executing code: {e}"
 
 
+# Inline budget for one structured-content string leaf rendered next to
+# `text` (t_efbe6b23: a 13KB payload must not travel twice on the wire).
+_STRUCTURED_STR_CAP = 1500
+
+
+def _structured_view(structured, text):
+    """Token-cheap view of structured for rendering beside text.
+
+    - string leaf >= 32 chars already present verbatim in text becomes
+      @same_as_text - those bytes are already on the wire once, and the
+      full copy lives in the spill file;
+    - any other string leaf longer than _STRUCTURED_STR_CAP is truncated
+      with an explicit elision marker.
+
+    Non-string leaves (bool/int/nested structures) pass through untouched.
+    """
+    def _walk(v):
+        if isinstance(v, str):
+            if len(v) >= 32 and v in text:
+                return "@same_as_text"
+            if len(v) > _STRUCTURED_STR_CAP:
+                omitted = len(v) - _STRUCTURED_STR_CAP
+                return v[:_STRUCTURED_STR_CAP] + "... [+" + format(omitted, ",") + " chars elided, see file]"
+            return v
+        if isinstance(v, dict):
+            return {k: _walk(val) for k, val in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [_walk(x) for x in v]
+        return v
+    return _walk(structured)
+
+
 @mcp.tool()
 async def mcp_call(
     ctx: Optional[FastMCPContext] = None,
@@ -500,7 +531,7 @@ async def mcp_call(
     stdin: Optional[str] = None,
     timeout: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
     endpoint: Optional[str] = None,
-) -> str:
+):
     resolved_endpoint = endpoint
     if resolved_endpoint is None and ctx is not None:
         try:
@@ -542,7 +573,7 @@ async def mcp_call(
     if structured is not None:
         lines.append("")
         lines.append("--- structured ---")
-        lines.append(json.dumps(structured))
+        lines.append(json.dumps(_structured_view(structured, text)))
     file_path = result.get("file", "")
     if file_path:
         lines.append("")

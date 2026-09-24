@@ -205,5 +205,72 @@ class TestEndpointResolution(unittest.TestCase):
         self.assertIn("[OK] exec/run", result)
 
 
+
+
+class TestPayloadDedup(unittest.TestCase):
+    """t_efbe6b23: a payload must not travel twice on the wire."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_tools_carry_no_output_schema(self):
+        """Neither tool declares a str return: fastmcp would otherwise wrap
+        the whole result into a second, identical structuredContent copy."""
+        tools = asyncio.run(server.mcp.list_tools())
+        for name in ('mcp_call', 'execute_code'):
+            tool = [x for x in tools if x.name == name][0]
+            self.assertFalse(
+                getattr(tool, 'output_schema', None),
+                name + ' still declares an output schema',
+            )
+
+    def test_structured_leaf_already_in_text_is_elided(self):
+        """A structured leaf that duplicates text is marked, not repeated."""
+        payload = ('line' + chr(10)) * 100
+        sc = {'stdout': payload, 'exit_code': 0}
+        async def fake_call(*a, **kw):
+            return {
+                'ok': True, 'is_error': False, 'upstream': 'vscode',
+                'action': 'execute', 'text': payload, 'content': [],
+                'structured_content': sc,
+            }
+        with patch.object(server, 'mcp_call_async', side_effect=fake_call):
+            result = self._run(server.mcp_call(
+                upstream='vscode', action='execute', arguments={}))
+        self.assertIn('@same_as_text', result)
+        self.assertNotIn(json.dumps(payload), result)
+        self.assertLess(len(result), len(payload) + 600)
+
+    def test_long_structured_leaf_is_capped(self):
+        """A big structured string that is NOT in text gets a capped preview."""
+        big = 'x' * 20000
+        sc = {'blob': big, 'n': 1}
+        async def fake_call(*a, **kw):
+            return {
+                'ok': True, 'is_error': False, 'upstream': 'u',
+                'action': 'a', 'text': 'unrelated', 'content': [],
+                'structured_content': sc,
+            }
+        with patch.object(server, 'mcp_call_async', side_effect=fake_call):
+            result = self._run(server.mcp_call(upstream='u', action='a', arguments={}))
+        self.assertIn('chars elided', result)
+        self.assertNotIn(big, result)
+        self.assertLess(len(result), 4000)
+
+    def test_distinct_structured_is_untouched(self):
+        """Structured that adds information renders in full: the point of
+        the dedupe is duplication, not information."""
+        sc = {'nodes': [{'name': 'n1', 'ready': True}]}
+        async def fake_call(*a, **kw):
+            return {
+                'ok': True, 'is_error': False, 'upstream': 'k8s',
+                'action': 'nodes_top', 'text': 'NAME  CPU', 'content': [],
+                'structured_content': sc,
+            }
+        with patch.object(server, 'mcp_call_async', side_effect=fake_call):
+            result = self._run(server.mcp_call(
+                upstream='k8s', action='nodes_top', arguments={}))
+        self.assertIn(json.dumps(sc), result)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
