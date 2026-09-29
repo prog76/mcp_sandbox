@@ -1,6 +1,7 @@
 """Skill management extensions — list, get, create, update skills."""
 
 import os
+import re
 import yaml
 
 from ipybox.kernel.templating import render_template
@@ -12,7 +13,26 @@ def register(registry):
     SKILLS_DIR = os.environ.get("IPYBOX_SKILLS_DIR", "/var/mcp/skills")
 
     def _safe_name(name: str) -> str:
-        return name.replace("/", "_").replace("\\", "_").replace("..", "_")
+        """Return a safe RELATIVE path for a skill, preserving nesting.
+
+        Refuses traversal with an error instead of silently renaming. The old
+        behaviour turned "methodology/dogfood" into "methodology_dogfood.md" at
+        the root (a DIFFERENT file than the caller asked for) and "../x" into
+        "__x". A silent wrong target is worse than a refusal.
+
+        Mirrors the guard in get_skill(), which already rejects leading "/" and
+        ".." segments, so reads and writes now agree on what is legal.
+        """
+        raw = (name or "").strip()
+        if raw.startswith("/") or raw.startswith("\\"):
+            raise ValueError("invalid skill name (absolute): %r" % name)
+        rel = raw.strip("/")
+        parts = [p for p in rel.split("/") if p not in ("", ".")]
+        if not parts or any(p == ".." for p in parts):
+            raise ValueError("invalid skill name: %r" % name)
+        if not all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", p) for p in parts):
+            raise ValueError("invalid skill name: %r" % name)
+        return "/".join(parts)
 
     def _parse_frontmatter(text: str):
         if not text.startswith("---"):
@@ -108,10 +128,30 @@ def register(registry):
 
         return f"Error: Skill '{name}' not found."
 
+    def _resolve_path(name: str):
+        """Return the existing on-disk path for a skill, or None.
+
+        Uses the SAME candidate order as get_skill(), so reads and writes agree:
+          <name>            <name>.md            <name>/SKILL.md
+        Previously create/update only understood "<name>.md", so a skill stored
+        as <dir>/SKILL.md could be READ but never UPDATED.
+        """
+        for c in (
+            os.path.join(SKILLS_DIR, name),
+            os.path.join(SKILLS_DIR, name + ".md"),
+            os.path.join(SKILLS_DIR, name, "SKILL.md"),
+        ):
+            if os.path.isfile(c):
+                return c
+        return None
+
     def create_skill(name: str, content: str) -> str:
         """Create a new skill."""
-        safe = _safe_name(name)
-        path = os.path.join(SKILLS_DIR, f"{safe}.md")
+        try:
+            rel = _safe_name(name)
+        except ValueError as e:
+            return f"Error: invalid skill name '{name}': {e}"
+        path = os.path.join(SKILLS_DIR, f"{rel}.md")
         if os.path.exists(path):
             return f"Error: Skill '{name}' already exists."
         try:
@@ -124,9 +164,8 @@ def register(registry):
 
     def update_skill(name: str, content: str) -> str:
         """Update an existing skill."""
-        safe = _safe_name(name)
-        path = os.path.join(SKILLS_DIR, f"{safe}.md")
-        if not os.path.exists(path):
+        path = _resolve_path(name)
+        if path is None:
             return f"Error: Skill '{name}' not found."
         try:
             with open(path, "w") as f:
