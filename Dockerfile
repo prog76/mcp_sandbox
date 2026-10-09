@@ -7,14 +7,25 @@
 #
 # Entrypoint ships in the package: ipybox-server (ipybox.cli:main).
 
-FROM python:3.12-slim
+ARG PYTHON_SLIM_BASE=python:3.12-slim@sha256:05cda9777409a9c3ffddd94a4c476b79f0769a0b4857f0c7ed9226b6800b0d6f
+FROM ${PYTHON_SLIM_BASE}
 
 # System dependencies for IPython kernel + Jupyter ZMQ comms
+# CANONICAL APT PREAMBLE (byte-identical across python images).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    curl \
     ca-certificates \
-    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+# Shared layers -- byte-identical to gateway/sandbox (TRACK A).
+RUN pip install --no-cache-dir httpx==0.28.1
+RUN pip install --no-cache-dir PyYAML==6.0.3
+RUN pip install --no-cache-dir websockets==17.1
+RUN pip install --no-cache-dir fastmcp==3.4.7
+RUN pip install --no-cache-dir mcp==1.30.0
+
+# build-essential: only this image needs it (native pip builds).
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the ipybox-sandbox package (pulls ipykernel, fastmcp, mcp2cli, ...).
